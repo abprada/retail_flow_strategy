@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+__marimo__/
+
+# Data (raw pulls and derived artifacts stay local)
+data/raw/*
+data/interim/*
+data/processed/*
+!data/**/.gitkeep
+
+# OS / editor
+.DS_Store
+.env
