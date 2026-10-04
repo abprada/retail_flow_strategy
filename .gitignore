@@ -17,8 +17,7 @@ __marimo__/
 
 # Data (raw pulls and derived artifacts stay local)
 data/raw/*
-data/interim/*
-data/processed/*
+data/intermediate/*
 !data/**/.gitkeep
 
 # OS / editor
