@@ -45,7 +45,16 @@ C5 keeps drops from 1 to 9 holders, which look real; any cut-off from 5 to 13 fl
 
 ## 5. Corporate events (recorded, not applied)
 
-3,634 CRSP events on 1,622 PERMNOs inside the Robintrack period: splits, reverse splits, stock dividends, spin-offs, mergers, liquidations, delistings, and ticker, name and CUSIP changes. Counterparties are listed too, such as the acquirer in a stock merger or the new company in a spin-off. These move holder counts without trading; excluding them is left for later, with the window chosen on training data. CRSP has no announcement date for mergers or delistings.
+3,634 CRSP events on 1,622 PERMNOs inside the Robintrack period: splits, reverse splits, stock dividends, spin-offs, mergers, liquidations, delistings, and ticker, name and CUSIP changes. Counterparties are listed too, such as the acquirer in a stock merger or the new company in a spin-off. CRSP has no announcement date for mergers or delistings.
+
+Event rows are kept; nothing is excluded around them. On train:
+
+- **Forward splits:** holders rise about 6% on the day and keep climbing. Retail buying the cheaper shares.
+- **Reverse splits:** a lasting drop of about 30%, consistent with holders of fewer shares than the ratio being cashed out. Kept anyway.
+- **Spin-off parents:** the holder jump tracks the parent's price drop on the ex-date (correlation -0.87, KAR -60% and 15x holders) and comes with heavy volume. Retail buying the apparent drop: flow.
+- **Spin-off children:** holders climb smoothly with volume rather than in one delivery step. Flow.
+- **Ticker, name and CUSIP changes:** no effect once matched by PERMNO. The large moves are reverse splits and mergers under another label.
+- **Stock-merger acquirers:** holders rise one to one with the target's last count over days 0 to 5 (MPC +264 against Andeavor's 263; correlation 0.77). Positions are converted, not bought. Left in, because it touches only a handful of rows above 100 holders and the daily clipping caps them.
 
 ## 6. Daily data
 
@@ -110,5 +119,5 @@ Train and test go to separate files, so estimation (`02_robintrack_returns.py`) 
 ## Open items
 
 - **2018-10-09:** the close sweep reached only 20% of stocks; it is not yet treated as an outage.
-- **Corporate-event exclusion window** for the holder target: to be chosen on train.
+- **Corporate events are not treated** (see section 5). Merger conversions into the acquirer are known not to be flow; they could be netted out with the target's last holder count if they turn out to matter.
 - **Market cap** uses CRSP's share count, which can be dated before it was public.

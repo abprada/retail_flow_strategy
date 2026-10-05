@@ -23,8 +23,10 @@ def _():
     import numpy as np
     import pandas as pd
     import statsmodels.api as sm
+    from sklearn.linear_model import Lasso, lasso_path
+    from sklearn.model_selection import TimeSeriesSplit
 
-    return mo, pd, plt, sm
+    return Lasso, TimeSeriesSplit, lasso_path, mo, np, pd, plt, sm
 
 
 @app.cell
@@ -50,8 +52,6 @@ def _(mo, panel):
 def _(mo, panel, pd, plt):
     _versions = {
         "rh_pct_lag1_zw": "X: % change in holders on day t-1",
-        "rh_logchg_lag1_zw": "X: log change in holders on day t-1",
-        "rh_log1pchg_lag1_zw": "X: change in log(1 + holders) on day t-1",
         "ret_next_dm": "y: next-day return minus the universe's mean that day",
     }
     _d = panel[["date", *_versions]].dropna()
@@ -66,14 +66,14 @@ def _(mo, panel, pd, plt):
 
 
     _summary = pd.DataFrame({_c: _stats(_d[_c]) for _c in _versions})
-    _fig, _axes = plt.subplots(1, 4, figsize=(15, 3.2))
+    _fig, _axes = plt.subplots(1, len(_versions), figsize=(4 * len(_versions), 3.2))
     for _ax, (_c, _label) in zip(_axes, _versions.items()):
         _lo, _hi = _d[_c].quantile([0.01, 0.99])
         _ax.hist(_d.loc[_d[_c].between(_lo, _hi), _c], bins=120)
         _ax.set_title(_c, fontsize=9)
     _fig.tight_layout()
     mo.vstack([
-        mo.md("**The regression sample** (rows with all four values). X are z-scores of the winsorized values within the 15:50 universe each day (`_zw`). " + "; ".join(f"`{k}`: {v}" for k, v in _versions.items())),
+        mo.md("**The regression sample** (rows with both values). X is the z-score of the winsorized values within the 15:50 universe each day (`_zw`). " + "; ".join(f"`{k}`: {v}" for k, v in _versions.items())),
         mo.ui.table(_summary.reset_index(names="statistic").round(6), selection=None, page_size=20),
         _fig,
     ])
@@ -85,13 +85,11 @@ def _(mo):
     mo.md(r"""
     ## OLS: next-day return on the previous day's change in holders
 
-    $r^{dm}_{t \to t+1} = \alpha + \beta X_{t-1} + \varepsilon$, once for each unit of the previous day's change in Robinhood holders, all known by 15:50 on day t:
+    $r^{dm}_{t \to t+1} = \alpha + \beta X_{t-1} + \varepsilon$, with X the previous day's change in Robinhood holders, known by 15:50 on day t:
 
-    1. `rh_pct_lag1_zw`: % change, $h_{t-1}/h_{t-2} - 1$
-    2. `rh_logchg_lag1_zw`: log change, $\log(h_{t-1}/h_{t-2})$
-    3. `rh_log1pchg_lag1_zw`: change in $\log(1 + h)$, $\log(1 + h_{t-1}) - \log(1 + h_{t-2})$
+    `rh_pct_lag1_zw`: % change, $h_{t-1}/h_{t-2} - 1$
 
-    Each X is winsorized at that day's 1st and 99th percentiles within the 15:50 universe, then z-scored with that day's mean and standard deviation, so $\beta$ is the next-day return for a one-standard-deviation move. y is `ret_next_dm`, the next-day return minus the universe's mean that day. All three use the same rows. Standard errors are Driscoll-Kraay HAC (statsmodels' `hac-groupsum`, 5 lags): robust to correlation across stocks on the same day and to autocorrelation over days.
+    X is winsorized at that day's 1st and 99th percentiles within the 15:50 universe, then z-scored with that day's mean and standard deviation, so $\beta$ is the next-day return for a one-standard-deviation move. y is `ret_next_dm`, the next-day return minus the universe's mean that day. Standard errors are Driscoll-Kraay HAC (statsmodels' `hac-groupsum`, 5 lags): robust to correlation across stocks on the same day and to autocorrelation over days.
     """)
     return
 
@@ -99,7 +97,7 @@ def _(mo):
 @app.cell
 def _(mo, panel, pd, sm):
     HAC_LAGS = 5  # Newey-West rule of thumb, 4 * (T / 100) ** (2 / 9), for about 400 days
-    X_VERSIONS = ["rh_pct_lag1_zw", "rh_logchg_lag1_zw", "rh_log1pchg_lag1_zw"]
+    X_VERSIONS = ["rh_pct_lag1_zw"]
 
     _d = panel[["date", "ret_next_dm", *X_VERSIONS]].dropna().sort_values("date")
     _time = pd.factorize(_d["date"], sort=True)[0]
@@ -117,6 +115,225 @@ def _(mo, panel, pd, sm):
         mo.md(f"**{len(_d):,} stock-days on {_d['date'].nunique():,} days**"),
         mo.ui.table(ols_comparison.round(6), selection=None),
         *[mo.plain_text(_m.summary().as_text()) for _m in ols_fits.values()],
+    ])
+    return (HAC_LAGS,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Features of the holder-change history
+
+    Four features of the daily % change in holders $g$, all built in 01 from each stock's full daily history and ending at day t-1, so known by 15:50 on day t:
+
+    1. `rh_pct_accel_lag1`: acceleration, $g_{t-1} - g_{t-2}$
+    2. `rh_pct_sq_lag1`: squared change, $g_{t-1}^2$, a one-day variance
+    3. `rh_pct_vol_lag1`: volatility, the standard deviation of $g$ over the last 20 trading days (at least 10 changes)
+    4. `rh_pct_dev_lag1`: deviation from the long-run mean, $g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes)
+
+    Each is used as `_zw`, like `rh_pct_lag1_zw`: winsorized at the day's 1st and 99th percentiles within the 15:50 universe, then z-scored that day. The matrix is the pooled Pearson correlation on rows with all five values.
+    """)
+    return
+
+
+@app.cell
+def _(mo, np, panel, plt):
+    HOLDER_FEATURES = ["rh_pct_lag1_zw", "rh_pct_accel_lag1_zw", "rh_pct_sq_lag1_zw", "rh_pct_vol_lag1_zw", "rh_pct_dev_lag1_zw"]
+
+    _d = panel[HOLDER_FEATURES].dropna()
+    holder_feature_corr = _d.corr()
+    _fig, _ax = plt.subplots(figsize=(6.5, 5.5))
+    _im = _ax.imshow(holder_feature_corr, cmap="RdBu_r", vmin=-1, vmax=1)
+    _labels = [_c.removeprefix("rh_pct_").removesuffix("_zw") for _c in HOLDER_FEATURES]
+    _ax.set_xticks(range(len(_labels)), _labels, rotation=45, ha="right")
+    _ax.set_yticks(range(len(_labels)), _labels)
+    for (_i, _j), _v in np.ndenumerate(holder_feature_corr.to_numpy()):
+        _ax.text(_j, _i, f"{_v:.2f}", ha="center", va="center", fontsize=9)
+    _fig.colorbar(_im, ax=_ax, shrink=0.8)
+    _fig.tight_layout()
+    mo.vstack([mo.md(f"**{len(_d):,} stock-days on {panel.loc[_d.index, 'date'].nunique():,} days**"), _fig])
+    return (HOLDER_FEATURES,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### OLS on each feature, one at a time
+
+    $r^{dm}_{t \to t+1} = \alpha + \beta X_{t-1} + \varepsilon$ for each of the five features above, each on the rows where it exists. All X are the `_zw` versions (winsorized at the day's 1st and 99th percentiles, then demeaned and scaled within the universe that day), so $\beta$ is in return per standard deviation. y and the Driscoll-Kraay HAC errors are as in the OLS above.
+    """)
+    return
+
+
+@app.cell
+def _(HAC_LAGS, HOLDER_FEATURES, mo, panel, pd, sm):
+    _fits = {}
+    for _x in HOLDER_FEATURES:
+        _d = panel[["date", "ret_next_dm", _x]].dropna().sort_values("date")
+        _fits[_x] = sm.OLS(_d["ret_next_dm"], sm.add_constant(_d[_x])).fit(
+            cov_type="hac-groupsum", cov_kwds={"time": pd.factorize(_d["date"], sort=True)[0], "maxlags": HAC_LAGS}
+        )
+    feature_ols_fits = _fits
+    feature_ols_comparison = pd.DataFrame([
+        {"X": _x, "beta_bp_per_sd": _m.params[_x] * 1e4, "hac_t": _m.tvalues[_x], "p": _m.pvalues[_x], "r_squared": _m.rsquared, "n": int(_m.nobs)}
+        for _x, _m in feature_ols_fits.items()
+    ])
+    mo.vstack([
+        mo.ui.table(feature_ols_comparison.round(6), selection=None),
+        *[mo.plain_text(_m.summary().as_text()) for _m in feature_ols_fits.values()],
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### OLS on the three significant features together
+
+    $r^{dm}_{t \to t+1} = \alpha + \beta_1\, \text{level}_{t-1} + \beta_2\, \text{sq}_{t-1} + \beta_3\, \text{vol}_{t-1} + \varepsilon$, in sample on the training period, on the rows where all three exist. Same `_zw` units, y and Driscoll-Kraay HAC errors as above.
+    """)
+    return
+
+
+@app.cell
+def _(HAC_LAGS, mo, panel, pd, sm):
+    JOINT_FEATURES = ["rh_pct_lag1_zw", "rh_pct_sq_lag1_zw", "rh_pct_vol_lag1_zw"]
+
+    _d = panel[["date", "ret_next_dm", *JOINT_FEATURES]].dropna().sort_values("date")
+    joint_ols_fit = sm.OLS(_d["ret_next_dm"], sm.add_constant(_d[JOINT_FEATURES])).fit(
+        cov_type="hac-groupsum", cov_kwds={"time": pd.factorize(_d["date"], sort=True)[0], "maxlags": HAC_LAGS}
+    )
+    mo.vstack([
+        mo.md(f"**{len(_d):,} stock-days on {_d['date'].nunique():,} days**"),
+        mo.plain_text(joint_ols_fit.summary().as_text()),
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### Lasso on all five features
+
+    $\min_{\alpha, \beta}\ \frac{1}{2n}\sum (r^{dm}_{t \to t+1} - \alpha - X_{t-1}\beta)^2 + \lambda \lVert \beta \rVert_1$ with the five `_zw` features above, on the rows where all five exist. The X are already on one scale (z-scores within each day), so the penalty treats them alike.
+
+    $\lambda$ is chosen by forward-chaining cross-validation over days: the training days are cut into 6 consecutive blocks, and each of the last 5 is predicted by a fit on all days before it, with a 1-day gap so no training label overlaps a validation day. The score is the out-of-sample $R^2$ against predicting the training mean, which is about 0 since y is demeaned each day. The final fit uses the chosen $\lambda$ on all training rows; it is still in sample.
+    """)
+    return
+
+
+@app.cell
+def _(
+    HOLDER_FEATURES,
+    Lasso,
+    TimeSeriesSplit,
+    lasso_path,
+    mo,
+    np,
+    panel,
+    pd,
+    plt,
+):
+    LASSO_FOLDS = 5
+    _d = panel[["date", "ret_next_dm", *HOLDER_FEATURES]].dropna().sort_values("date").reset_index(drop=True)
+    _X, _y = _d[HOLDER_FEATURES].to_numpy(), _d["ret_next_dm"].to_numpy()
+    _days = np.sort(_d["date"].unique())
+    _lambdas, _, _ = lasso_path(_X - _X.mean(0), _y - _y.mean(), alphas=60, eps=1e-4)
+
+    # forward-chaining folds over days, with a 1-day gap between the last training day and the validation block
+    _r2 = []
+    for _tr_days, _va_days in TimeSeriesSplit(n_splits=LASSO_FOLDS, gap=1).split(_days):
+        _tr, _va = _d["date"].isin(_days[_tr_days]).to_numpy(), _d["date"].isin(_days[_va_days]).to_numpy()
+        _xm, _ym = _X[_tr].mean(0), _y[_tr].mean()
+        _, _coefs, _ = lasso_path(_X[_tr] - _xm, _y[_tr] - _ym, alphas=_lambdas)
+        _pred = _ym + (_X[_va] - _xm) @ _coefs  # one column per lambda
+        _sse = ((_y[_va, None] - _pred) ** 2).sum(0)
+        _r2.append(1 - _sse / ((_y[_va] - _ym) ** 2).sum())
+    lasso_cv = pd.DataFrame({"lambda": _lambdas, "oos_r2_mean": np.mean(_r2, axis=0), "oos_r2_se": np.std(_r2, axis=0, ddof=1) / np.sqrt(LASSO_FOLDS)})
+    LASSO_LAMBDA = lasso_cv.loc[lasso_cv["oos_r2_mean"].idxmax(), "lambda"]
+
+    _, _path, _ = lasso_path(_X - _X.mean(0), _y - _y.mean(), alphas=_lambdas)
+    lasso_fit = Lasso(alpha=LASSO_LAMBDA).fit(_X, _y)
+    lasso_coefs = pd.DataFrame({"X": HOLDER_FEATURES, "beta_bp_per_sd": lasso_fit.coef_ * 1e4})
+
+    _fig, (_a1, _a2) = plt.subplots(1, 2, figsize=(13, 4))
+    for _i, _x in enumerate(HOLDER_FEATURES):
+        _a1.plot(_lambdas, _path[_i] * 1e4, label=_x.removeprefix("rh_pct_").removesuffix("_zw"))
+    _a1.set(xscale="log", xlabel="lambda", ylabel="beta (bp per sd)", title="Lasso path, all training rows")
+    _a1.legend(fontsize=8)
+    _a2.errorbar(lasso_cv["lambda"], lasso_cv["oos_r2_mean"] * 1e4, yerr=lasso_cv["oos_r2_se"] * 1e4, fmt="o-", ms=3)
+    _a2.axhline(0, color="grey", lw=0.8)
+    _a2.set(xscale="log", xlabel="lambda", ylabel="out-of-sample R2 (bp)", title=f"Forward-chaining CV, {LASSO_FOLDS} folds")
+    for _ax in (_a1, _a2):
+        _ax.axvline(LASSO_LAMBDA, color="k", ls="--", lw=0.8)
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md(f"**{len(_d):,} stock-days on {len(_days):,} days.** Chosen lambda {LASSO_LAMBDA:.2e}, CV out-of-sample R2 {lasso_cv['oos_r2_mean'].max() * 1e4:.2f} bp (dashed line)."),
+        mo.ui.table(lasso_coefs.round(4), selection=None),
+        _fig,
+    ])
+    return LASSO_LAMBDA, lasso_fit
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### Significance of the lasso betas
+
+    Lasso coefficients have no standard errors of their own: the penalty biases them towards 0 and the selection depends on the data. Two ways around it:
+
+    1. **Post-lasso OLS:** OLS with Driscoll-Kraay HAC errors on the features the lasso kept. The t-stats ignore the selection step, so they overstate significance when the selection is unstable; the bootstrap below shows how often each feature is kept.
+    2. **Block bootstrap of the lasso itself:** resample blocks of 5 consecutive training days (the HAC lag length) with replacement, refit the lasso at the chosen $\lambda$, and record each $\beta$. Resampling whole days keeps the correlation across stocks on a day; blocks keep the autocorrelation over days. Reported: how often each feature is kept, and the 2.5th and 97.5th percentiles of $\beta$. $\lambda$ stays fixed at the cross-validated value.
+    """)
+    return
+
+
+@app.cell
+def _(
+    HAC_LAGS,
+    HOLDER_FEATURES,
+    LASSO_LAMBDA,
+    Lasso,
+    lasso_fit,
+    mo,
+    np,
+    panel,
+    pd,
+    sm,
+):
+    LASSO_BOOT_DRAWS, LASSO_BOOT_BLOCK = 200, HAC_LAGS
+    _d = panel[["date", "ret_next_dm", *HOLDER_FEATURES]].dropna().sort_values("date").reset_index(drop=True)
+    _X, _y = _d[HOLDER_FEATURES].to_numpy(), _d["ret_next_dm"].to_numpy()
+
+    # post-lasso OLS on the kept features
+    LASSO_SELECTED = [_x for _x, _b in zip(HOLDER_FEATURES, lasso_fit.coef_) if _b != 0]
+    post_lasso_fit = sm.OLS(_d["ret_next_dm"], sm.add_constant(_d[LASSO_SELECTED])).fit(
+        cov_type="hac-groupsum", cov_kwds={"time": pd.factorize(_d["date"], sort=True)[0], "maxlags": HAC_LAGS}
+    )
+
+    # moving-block bootstrap over days
+    _day_rows = np.split(np.arange(len(_d)), np.flatnonzero(np.diff(pd.factorize(_d["date"])[0])) + 1)
+    _n_days = len(_day_rows)
+    _rng = np.random.default_rng(0)
+    _draws = []
+    for _ in range(LASSO_BOOT_DRAWS):
+        _starts = _rng.integers(0, _n_days - LASSO_BOOT_BLOCK + 1, size=-(-_n_days // LASSO_BOOT_BLOCK))
+        _rows = np.concatenate([_day_rows[_k] for _s in _starts for _k in range(_s, _s + LASSO_BOOT_BLOCK)])
+        _draws.append(Lasso(alpha=LASSO_LAMBDA).fit(_X[_rows], _y[_rows]).coef_)
+    _draws = np.array(_draws) * 1e4
+    lasso_inference = pd.DataFrame({
+        "X": HOLDER_FEATURES,
+        "lasso_beta_bp": lasso_fit.coef_ * 1e4,
+        "boot_kept_share": (_draws != 0).mean(0),
+        "boot_p2.5_bp": np.percentile(_draws, 2.5, axis=0),
+        "boot_p97.5_bp": np.percentile(_draws, 97.5, axis=0),
+        "post_lasso_beta_bp": [post_lasso_fit.params.get(_x, np.nan) * 1e4 for _x in HOLDER_FEATURES],
+        "post_lasso_hac_t": [post_lasso_fit.tvalues.get(_x, np.nan) for _x in HOLDER_FEATURES],
+    })
+    mo.vstack([
+        mo.md(f"**{len(_d):,} stock-days on {_n_days:,} days; {LASSO_BOOT_DRAWS} bootstrap draws of {LASSO_BOOT_BLOCK}-day blocks; lambda {LASSO_LAMBDA:.2e}**"),
+        mo.ui.table(lasso_inference.round(4), selection=None),
+        mo.plain_text(post_lasso_fit.summary().as_text()),
     ])
     return
 

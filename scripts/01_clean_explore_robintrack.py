@@ -1395,7 +1395,8 @@ def _(mo):
     Two panels come out of this notebook. The **holder panel** (Model 1) needs day t's close count, because its label is day t's change. The **return panel** (the return tests in 02) must not: the decision is made at 15:50 on day t, so which stocks are in it can only use what was known then.
 
     - **Rows:** every stock and trading day t in the **15:50 universe**: a CRSP price of at least $1 and at least 100 Robinhood holders at day t-1's close. A stock stays in even if day t's close reading is missing or a break follows.
-    - **X, known by 15:50 on day t:** `rh_pct_lag1`, the % change in holders on day t-1 (from T2; missing if day t-1 had no usable change). `_dm` is demeaned within the universe each day; `_wdm` is clipped at that day's 1st and 99th percentiles within the universe, then demeaned. Two standardized versions: `_zw` is the z-score of the winsorized values (clip at the day's 1st and 99th percentiles, then subtract the day's mean and divide by its standard deviation); `_wz` is the winsorized z-score (z-score with the day's raw mean and standard deviation, then clip at the day's 1st and 99th percentiles of the z-scores). The same change in two log units, `rh_logchg_lag1` $= \log(h_{t-1}/h_{t-2})$ (missing when the count fell to 0) and `rh_log1pchg_lag1` $= \log(1 + h_{t-1}) - \log(1 + h_{t-2})$, each with a `_zw` version built the same way.
+    - **X, known by 15:50 on day t:** `rh_pct_lag1`, the % change in holders on day t-1 (from T2; missing if day t-1 had no usable change). `_dm` is demeaned within the universe each day; `_wdm` is clipped at that day's 1st and 99th percentiles within the universe, then demeaned. Two standardized versions: `_zw` is the z-score of the winsorized values (clip at the day's 1st and 99th percentiles, then subtract the day's mean and divide by its standard deviation); `_wz` is the winsorized z-score (z-score with the day's raw mean and standard deviation, then clip at the day's 1st and 99th percentiles of the z-scores).
+    - **Features of the holder-change history, known by 15:50 on day t** (built on each PERMNO's whole daily history, all ending at day t-1's change $g_{t-1}$): `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$; `rh_pct_sq_lag1` $= g_{t-1}^2$; `rh_pct_vol_lag1`, the standard deviation of $g$ over the last 20 trading days (at least 10 changes); `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes). Each has a `_zw` version built like `rh_pct_lag1_zw`.
     - **Upper bound only, known after day t's close:** `rh_pct_t` and its `_dm` and `_wdm` versions, missing when day t has no usable change.
     - **y:** `ret_next`, CRSP's total return from day t's close to the next trading day's close, and `ret_next_dm`, demeaned within the universe. Kept when CRSP's return covers one trading day (D1 to D4, DU) or is a delisting payoff (DD). A delisting payoff can span more than a day, so those rows carry `ret_next_is_delisting`.
     - **Also:** `ret_prev`, `price_prev`, `cap_prev`, `dollar_volume_prev` (day t-1) and `is_common` (day t).
@@ -1405,14 +1406,45 @@ def _(mo):
 
 
 @app.cell
+def _(TRADING_DAYS, pd, t2_change):
+    # Features of the daily % change in holders, built from each PERMNO's whole daily history on the trading-day grid
+    # (not only universe rows), so a rolling window always spans consecutive trading days. A day without a usable change
+    # is missing and does not count. Each row is keyed by the day of the change; the return panel joins it as day t-1,
+    # so every feature uses closes up to day t-1 only.
+    HOLDER_VOL_WINDOW, HOLDER_MEAN_WINDOW = 20, 60  # trading days, about one and three months
+    _pct = (t2_change["change"] / t2_change["holders_prev"]).astype(float).where(t2_change["status"].eq("ok"))
+    _wide = (
+        pd.DataFrame({"permno": t2_change["permno"], "date": t2_change["date"], "pct": _pct})
+        .pivot(index="date", columns="permno", values="pct")
+        .reindex(TRADING_DAYS)
+    )
+    _features = {
+        "rh_pct_accel_lag1": _wide - _wide.shift(1),  # acceleration: this change minus the previous day's
+        "rh_pct_sq_lag1": _wide**2,  # squared change, a one-day variance
+        "rh_pct_vol_lag1": _wide.rolling(HOLDER_VOL_WINDOW, min_periods=HOLDER_VOL_WINDOW // 2).std(),  # rolling volatility
+        # deviation from the stock's own mean change over the previous 60 days, excluding the day itself
+        "rh_pct_dev_lag1": _wide - _wide.rolling(HOLDER_MEAN_WINDOW, min_periods=HOLDER_MEAN_WINDOW // 2).mean().shift(1),
+    }
+    holder_change_features = (
+        pd.concat({_k: _v.stack() for _k, _v in _features.items()}, axis=1)
+        .dropna(how="all")
+        .rename_axis(["prev_day", "permno"])
+        .reset_index()
+    )
+    HOLDER_CHANGE_FEATURES = list(_features)
+    return HOLDER_CHANGE_FEATURES, holder_change_features
+
+
+@app.cell
 def _(
     ALL_TRADING_DAYS,
     CRSP_NAMES_PATH,
     HOLDERS_MIN,
+    HOLDER_CHANGE_FEATURES,
     PRICE_MIN,
     TRADING_DAYS,
     crsp_daily,
-    np,
+    holder_change_features,
     pd,
     t1_close,
     t2_change,
@@ -1428,14 +1460,6 @@ def _(
     _pct = t2_change.assign(
         pct=(t2_change["change"] / t2_change["holders_prev"]).astype(float).where(t2_change["status"].eq("ok"))
     )[["permno", "date", "pct"]]
-    # day t-1's change in two log units: log(h / h_prev) (missing when h is 0) and log(1 + h) - log(1 + h_prev)
-    _h1, _h0, _ok = t2_change["holders"].astype(float), t2_change["holders_prev"].astype(float), t2_change["status"].eq("ok")
-    _logs = pd.DataFrame({
-        "permno": t2_change["permno"],
-        "prev_day": t2_change["date"],
-        "rh_logchg_lag1": np.log(_h1.where(_h1 > 0) / _h0).where(_ok),
-        "rh_log1pchg_lag1": (np.log1p(_h1) - np.log1p(_h0)).where(_ok),
-    })
     _prev = crsp_daily[["permno", "date", "price", "ret", "cap", "dollar_volume"]].rename(
         columns={"date": "prev_day", "price": "price_prev", "ret": "ret_prev", "cap": "cap_prev", "dollar_volume": "dollar_volume_prev"}
     )
@@ -1443,7 +1467,7 @@ def _(
     _r = (
         _r.merge(_pct.rename(columns={"date": "prev_day", "pct": "rh_pct_lag1"}), on=["permno", "prev_day"], how="left")
         .merge(_pct.rename(columns={"pct": "rh_pct_t"}), on=["permno", "date"], how="left")
-        .merge(_logs, on=["permno", "prev_day"], how="left")
+        .merge(holder_change_features, on=["permno", "prev_day"], how="left")
         .merge(_prev, on=["permno", "prev_day"], how="left")
         .merge(_next, on=["permno", "next_day"], how="left")
     )
@@ -1479,7 +1503,8 @@ def _(
     _q = _v.groupby(_day).quantile([0.01, 0.99]).unstack()
     _w = _v.clip(_day.map(_q[0.01]), _day.map(_q[0.99]))
     _r["rh_pct_lag1_zw"] = (_w - _w.groupby(_day).transform("mean")) / _w.groupby(_day).transform("std")  # z-score of the winsorized values
-    for _f in ("rh_logchg_lag1", "rh_log1pchg_lag1"):
+    # the features of the holder-change history, each as the z-score of its winsorized values
+    for _f in HOLDER_CHANGE_FEATURES:
         _qf = _r[_f].groupby(_day).quantile([0.01, 0.99]).unstack()
         _wf = _r[_f].clip(_day.map(_qf[0.01]), _day.map(_qf[0.99]))
         _r[f"{_f}_zw"] = (_wf - _wf.groupby(_day).transform("mean")) / _wf.groupby(_day).transform("std")
@@ -1488,7 +1513,10 @@ def _(
     _r["rh_pct_lag1_wz"] = _z.clip(_day.map(_qz[0.01]), _day.map(_qz[0.99]))  # winsorized z-scores
     _r["ret_next_dm"] = _r["ret_next"] - _r.groupby("date")["ret_next"].transform("mean")
     returns_panel = _r.sort_values(["permno", "date"]).reset_index(drop=True)
-    FEATURES_AT_1550 = ["rh_pct_lag1", "rh_pct_lag1_dm", "rh_pct_lag1_wdm", "rh_pct_lag1_zw", "rh_pct_lag1_wz", "rh_logchg_lag1", "rh_logchg_lag1_zw", "rh_log1pchg_lag1", "rh_log1pchg_lag1_zw"]
+    FEATURES_AT_1550 = [
+        "rh_pct_lag1", "rh_pct_lag1_dm", "rh_pct_lag1_wdm", "rh_pct_lag1_zw", "rh_pct_lag1_wz",
+        *HOLDER_CHANGE_FEATURES, *(f"{_f}_zw" for _f in HOLDER_CHANGE_FEATURES),
+    ]
     FEATURES_AFTER_CLOSE = ["rh_pct_t", "rh_pct_t_dm", "rh_pct_t_wdm"]
 
     return FEATURES_AFTER_CLOSE, FEATURES_AT_1550, returns_panel
