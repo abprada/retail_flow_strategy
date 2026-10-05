@@ -32,7 +32,7 @@ def _(mo):
     RAW_DIR = DATA_DIR / "raw" / "robintrack" / "popularity_export"
     CRSP_NAMES_PATH = DATA_DIR / "raw" / "crsp" / "stocknames_v2.csv"
     INTERMEDIATE_DIR = DATA_DIR / "intermediate"
-    return CRSP_NAMES_PATH, INTERMEDIATE_DIR, RAW_DIR
+    return CRSP_NAMES_PATH, DATA_DIR, INTERMEDIATE_DIR, RAW_DIR
 
 
 @app.cell
@@ -118,7 +118,7 @@ def _(mo):
     3. **Date match:** a snapshot belongs to the latest session that has opened, its New York date or the day before if taken before 09:30 ET, because CRSP ticker changes take effect at the open.
     4. **Two classes in one file:** until the dotted files start on 2020-01-16, 15 base files also hold their sibling class. In a sweep of two rows with different values the higher is the base class; any other row goes to the class whose last value is closer. Those rows are matched as the sibling class.
     5. **One instrument per file:** an instrument can keep its id through a ticker change, so the file name can be a ticker it only got later (`CVLG` was `CVTI` until July 2020; `GOLD` was Barrick's `ABX` in 2018, when `GOLD` was Randgold). Rows up to a file's last date match take the PERMNO most of its matched rows point to, while that security exists in CRSP. Rows after it ends are dropped (`CZR`'s last days after the Caesars merger); rows before it began keep their date match (funds moved into a new trust get a new PERMNO). Rows after the last date match are not filled: an instrument still reporting under its old ticker after a rename is stale (`PAH` after it became `ESI`), and the new ticker's file holds the security.
-    6. **Overlap at a rename:** if two files hold the same PERMNO at the same time, the date-matched rows win over rows filled by rule 5 (the new instrument's first rows can start minutes before the old one's last).
+    6. **Overlap at a rename:** if two files hold the same PERMNO at the same time, the date-matched rows win over rows that rule 5 filled or moved to another PERMNO (the new instrument's first rows can start minutes before the old one's last).
     7. A snapshot left without a PERMNO is dropped and counted in the match report.
     8. **No double counting:** within a PERMNO, rows from different files (or from the split) must not overlap in time.
     """)
@@ -292,11 +292,13 @@ def _(
         if _sib.any() and len(_sib_cls) == 1:
             _permno[_sib], _hits[_sib] = permno_on(_dates[_sib], crsp_spells(_k.base, next(iter(_sib_cls))))
         _date_matched = _permno != 0
+        _matched_to = _permno.copy()  # the date match alone, before rule 5
         for _part in (~_sib, _sib):
             if _part.any():
                 _permno[_part] = by_identity(_dates[_part], _permno[_part])
 
         _ok = _permno != 0
+        _filled = _permno != _matched_to  # added or reassigned by rule 5
         _report.append({
             "file": _k.file,
             "ticker": _k.ticker,
@@ -306,6 +308,7 @@ def _(
             "n_no_permno": int((_hits == 0).sum()),
             "n_ambiguous": int((_hits > 1).sum()),
             "n_added_by_identity": int((_ok & ~_date_matched).sum()),
+            "n_reassigned_by_identity": int((_ok & _date_matched & _filled).sum()),
             "n_dropped_after_end": int((~_ok & _date_matched).sum()),
             "n_matched": int(_ok.sum()),
             "permnos": " ".join(str(p) for p in sorted(set(_permno[_ok]))),
@@ -316,12 +319,12 @@ def _(
             "users_holding": _v[_ok].to_numpy(),
             "source_file": _k.file,
             "sibling_split": _sib[_ok],
-            "filled": (~_date_matched)[_ok],
+            "filled": _filled[_ok],
         }))
 
     rt_by_permno = pd.concat(_rows, ignore_index=True)
 
-    # where two files hold one PERMNO at the same time, date-matched rows win over rows filled by file identity
+    # where two files hold one PERMNO at the same time, date-matched rows win over rows filled or reassigned by file identity
     # (on the day of a rename the new instrument's first rows overlap the old one's last rows by minutes)
     _spans = (
         rt_by_permno[~rt_by_permno["filled"]].groupby(["permno", "source_file"])["timestamp"].agg(["min", "max"]).reset_index()
@@ -344,7 +347,7 @@ def _(match_report, mo, rt_by_permno):
     mo.md(f"""
     - **Rows kept:** {_r["n_matched"].sum():,} of {_r["n_rows"].sum():,} ({_r["n_matched"].sum() / _r["n_rows"].sum():.1%}); {_r["n_sibling"].sum():,} of them split off to a sibling class
     - **Date match:** {_r["n_date_matched"].sum():,} rows; {_r["n_no_permno"].sum():,} had no PERMNO on their date and {_r["n_ambiguous"].sum():,} had several ({", ".join(_r.loc[_r["n_ambiguous"] > 0, "ticker"])})
-    - **File identity:** {_r["n_added_by_identity"].sum():,} rows added (history under an earlier ticker), {_r["n_dropped_after_end"].sum():,} dropped after their security ended, {_r["n_dropped_overlap"].sum():,} dropped where another file's date-matched rows hold the same PERMNO
+    - **File identity:** {_r["n_added_by_identity"].sum():,} rows added (history under an earlier ticker), {_r["n_reassigned_by_identity"].sum():,} moved from their date match to the file's own security (`GOLD`'s 2018 rows from Randgold to Barrick), {_r["n_dropped_after_end"].sum():,} dropped after their security ended, {_r["n_dropped_overlap"].sum():,} dropped where another file's date-matched rows hold the same PERMNO
     - **Files with nothing kept:** {(_r["n_matched"] == 0).sum():,} (securities CRSP does not cover, e.g. OTC ADRs and ETNs)
     - **PERMNOs:** {rt_by_permno["permno"].nunique():,}; {(_files_per_permno > 1).sum():,} are fed by more than one file (ticker changes and the class splits)
     """)
@@ -756,7 +759,7 @@ def _(mo):
     mo.md(r"""
     ## C3: repeated readings
 
-    A full sweep asks Robinhood for about 8,600 instruments, 20 per request with at least a second between requests, so it takes at least 7 minutes and reads each instrument once. Two readings of one PERMNO less than 5 minutes apart therefore come from overlapping or restarted sweeps. Within a stretch from one raw file, every reading followed by another within 5 minutes is flagged, so each cluster keeps only its latest reading. Rows already flagged by C1 or C2 are left to those steps.
+    A full sweep asks Robinhood for about 8,600 instruments, 20 per request with at least a second between requests, so it takes at least 7 minutes and reads each instrument once. Two readings of one PERMNO less than 5 minutes apart therefore come from overlapping or restarted sweeps. Within a stretch from one raw file, every reading followed by another within 5 minutes is flagged, so each cluster keeps only its latest reading. Readings chain, so during the repeated sweeps a cluster can run well past 5 minutes; every flagged row is compared with that last reading. Rows already flagged by C1 or C2 are left to those steps.
     """)
     return
 
@@ -768,23 +771,30 @@ def _(pd, rt_permno):
 
 
 @app.cell
-def _(c1_placeholder, c2_placeholder, pd, rt_permno, rt_ts):
+def _(c1_placeholder, c2_placeholder, np, pd, rt_permno, rt_ts):
     _next_same_stretch = rt_permno["permno"].eq(rt_permno["permno"].shift(-1)) & rt_permno["source_file"].eq(
         rt_permno["source_file"].shift(-1)
     )
     _gap_to_next = (rt_ts.shift(-1) - rt_ts).dt.total_seconds()
     c3_repeat = _next_same_stretch & (_gap_to_next < 300) & ~c1_placeholder & ~c2_placeholder
 
-    _v = rt_permno["users_holding"]
-    _diff_to_kept = (_v.shift(-1) - _v)[c3_repeat]
+    # each flagged row gives way to the last reading of its cluster: the next row C3 does not flag (always in the same stretch)
+    _flagged = c3_repeat.to_numpy()
+    _kept = pd.Series(np.arange(len(rt_permno))).where(~_flagged).bfill().to_numpy()[_flagged].astype("int64")
+    _v = rt_permno["users_holding"].to_numpy()
+    _ts = rt_ts.to_numpy()
+    _gap_to_kept = (_ts[_kept] - _ts[_flagged]) / np.timedelta64(1, "s")
     c3_summary = pd.DataFrame({
-        "rows_flagged": [int(c3_repeat.sum())],
+        "rows_flagged": [int(_flagged.sum())],
         "permnos_affected": [rt_permno.loc[c3_repeat, "permno"].nunique()],
-        "gap_under_10s": [int((_gap_to_next[c3_repeat] < 10).sum())],
-        "gap_10s_to_1min": [int(_gap_to_next[c3_repeat].between(10, 60, inclusive="left").sum())],
-        "gap_1_to_5min": [int(_gap_to_next[c3_repeat].between(60, 300, inclusive="left").sum())],
-        "same_value_as_kept": [int((_diff_to_kept == 0).sum())],
+        "gap_under_10s": [int((_gap_to_kept < 10).sum())],
+        "gap_10s_to_1min": [int(((_gap_to_kept >= 10) & (_gap_to_kept < 60)).sum())],
+        "gap_1_to_5min": [int(((_gap_to_kept >= 60) & (_gap_to_kept < 300)).sum())],
+        "gap_5min_or_more": [int((_gap_to_kept >= 300).sum())],
+        "longest_gap_min": [round(float(_gap_to_kept.max()) / 60, 1)],
+        "same_value_as_kept": [int((_v[_kept] == _v[_flagged]).sum())],
     })
+
     return c3_repeat, c3_summary
 
 
@@ -795,7 +805,7 @@ def _(c3_repeat, c3_summary, mo, rt_permno):
     mo.vstack([
         mo.md(f"""
     - **Rows flagged:** {_c["rows_flagged"]:,} of {len(rt_permno):,} ({_c["rows_flagged"] / len(rt_permno):.2%}), in {_c["permnos_affected"]:,} PERMNOs
-    - **Gap to the kept reading:** under 10 seconds {_c["gap_under_10s"]:,}; 10 seconds to 1 minute {_c["gap_10s_to_1min"]:,}; 1 to 5 minutes {_c["gap_1_to_5min"]:,}
+    - **Gap to the reading kept (the last of its cluster):** under 10 seconds {_c["gap_under_10s"]:,}; 10 seconds to 1 minute {_c["gap_10s_to_1min"]:,}; 1 to 5 minutes {_c["gap_1_to_5min"]:,}; 5 minutes or more {_c["gap_5min_or_more"]:,} (longest {_c["longest_gap_min"]} minutes)
     - **Same value as the reading kept:** {_c["same_value_as_kept"]:,} ({_c["same_value_as_kept"] / max(_c["rows_flagged"], 1):.1%})
     """),
         mo.ui.table(_flagged.head(1000)),
@@ -808,7 +818,9 @@ def _(mo):
     mo.md(r"""
     ## C4: outages
 
-    Robintrack swept every hour around the clock, so more than 1.5 hours without a reading for any PERMNO means at least one sweep was missed. Each outage is listed with the weekday closes it wipes out (the whole 14:30 to 16:00 New York window empty); holidays are not separated out until there is a trading calendar.
+    Robintrack swept every hour around the clock, so more than 1.5 hours without a reading for any PERMNO means at least one sweep was missed. Each outage is listed with the weekday closes it wipes out: no reading in the 16:40 to 16:59 New York window, which is the reading that becomes the close. Holidays are not separated out until there is a trading calendar.
+
+    Why that window: Robintrack's counts lag the time they were read by about 25 to 40 minutes. Readings taken as late as 9:55 do not yet show the 9:30 open, and readings at 19:40 show no after-hours trading, which ended at 18:00. Sweeps run between :40 and :59 past the hour, so the 16:4x reading shows holdings at about 16:00 to 16:35 (the full session plus a few minutes of after-hours), while the 15:4x reading misses the last 30 to 60 minutes of trading. Any lag in that range picks the same reading.
 
     Nothing is dropped here. Outages are handled in the target: a daily change is taken only between two consecutive trading days that both have a close value, so the first day after an outage has a close but no change, and changes resume the day after. The same rule covers a single PERMNO missing a close while the rest are fine. A percentage change whose previous close is 0 is undefined and left missing; that comes from real zero holders, not from outages.
     """)
@@ -825,14 +837,16 @@ def _(np, pd, rt_ts):
     })
     c4_outages["hours"] = (c4_outages["first_reading_after"] - c4_outages["last_reading_before"]).dt.total_seconds() / 3600
 
+    CLOSE_WINDOW = (pd.Timedelta(hours=16, minutes=40), pd.Timedelta(hours=17))  # New York time; the reading that becomes the close
+
 
     def _closes_lost(before, after):
-        """Weekdays whose whole 14:30 to 16:00 New York window falls inside the outage."""
+        """Weekdays whose whole close window falls inside the outage."""
         before_ny, after_ny = before.tz_convert("America/New_York"), after.tz_convert("America/New_York")
         days = pd.date_range(before_ny.normalize(), after_ny.normalize(), freq="B")
         return [
             d.strftime("%Y-%m-%d") for d in days
-            if before_ny < d + pd.Timedelta(hours=14, minutes=30) and after_ny > d + pd.Timedelta(hours=16)
+            if before_ny < d + CLOSE_WINDOW[0] and after_ny >= d + CLOSE_WINDOW[1]
         ]
 
 
@@ -840,16 +854,25 @@ def _(np, pd, rt_ts):
         _closes_lost(b, a) for b, a in zip(c4_outages["last_reading_before"], c4_outages["first_reading_after"])
     ]
     c4_outages["n_closes_lost"] = c4_outages["weekday_closes_lost"].str.len()
-    return (c4_outages,)
+
+    # Direct check, independent of the outage list: weekdays with no reading at all inside the close window
+    _ny = pd.DatetimeIndex(_t).tz_localize("UTC").tz_convert("America/New_York")
+    _clock = _ny - _ny.normalize()
+    _read = set(_ny[(_clock >= CLOSE_WINDOW[0]) & (_clock < CLOSE_WINDOW[1])].strftime("%Y-%m-%d"))
+    c4_no_close_days = [d for d in pd.bdate_range("2018-05-02", "2020-08-13").strftime("%Y-%m-%d") if d not in _read]
+    return CLOSE_WINDOW, c4_no_close_days, c4_outages
 
 
 @app.cell
-def _(c4_outages, mo):
+def _(c4_no_close_days, c4_outages, mo):
     _o = c4_outages
+    _in_outages = {d for _days in _o["weekday_closes_lost"] for d in _days}
+    _elsewhere = sorted(set(c4_no_close_days) - _in_outages)
     mo.vstack([
         mo.md(f"""
     - **Outages (more than 1.5 hours without any reading):** {len(_o):,}, {_o["hours"].sum():,.0f} hours in total; longest {_o["hours"].max():,.1f} hours
     - **Weekday closes lost:** {_o["n_closes_lost"].sum():,}, in {(_o["n_closes_lost"] > 0).sum():,} outages
+    - **Direct check, weekdays with no reading at 16:40 to 16:59:** {len(c4_no_close_days):,}; {"all inside the outages below" if not _elsewhere else "outside any outage: " + ", ".join(_elsewhere)}
     """),
         mo.ui.table(_o.assign(weekday_closes_lost=_o["weekday_closes_lost"].str.join(", ")).sort_values("last_reading_before")),
     ])
@@ -859,16 +882,743 @@ def _(c4_outages, mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Checks before writing
+    ## Corporate events (noted, nothing dropped)
 
-    Run on exactly the rows that will be written (everything not flagged by C1 to C3). The write step refuses to run unless every check passes.
+    CRSP's records of events that change a stock's shares, matched to our PERMNOs inside the Robintrack period (2018-05-02 to 2020-08-13). Such events can move Robinhood holder counts without anyone trading: a reverse split or a new CUSIP can make Robinhood switch to a new instrument, and a stock merger turns the target's holders into the acquirer's. They are candidates to exclude from Model 1's target later. Nothing is dropped here.
+
+    Sources, all raw:
+
+    - `stkdistributions`: splits, reverse splits, stock dividends, spin-offs, merger and liquidation payments, rights. Left out: cash dividends, capital gains, return of capital and special cash dividends (cash only, nobody's shares change), and CRSP's share-count observations.
+    - `stkdelists`: delistings (merger, exchange, liquidation, dropped by the exchange).
+    - `stocknames_v2`: ticker, company name and CUSIP changes, i.e. a new CRSP name record whose field differs from the one before.
+
+    Codes are decoded with CRSP's own `metaflaginfo`. A stock is listed as a **counterparty** when its shares were handed to another stock's holders (the acquirer in a stock merger, the new company in a spin-off), since its holder count can jump that day too.
+
+    Point in time: `declared_date` is the announcement date. CRSP has it only for distributions, and even there not for mergers. Delistings and ticker, name and CUSIP changes carry only the date they took effect.
     """)
     return
 
 
 @app.cell
-def _(c1_placeholder, c2_placeholder, c3_repeat, mo, np, pd, rt_permno, rt_ts):
-    _keep = ~(c1_placeholder | c2_placeholder | c3_repeat).to_numpy()
+def _(CRSP_NAMES_PATH, pd, permno_inventory):
+    _crsp = CRSP_NAMES_PATH.parent
+    _start, _end = "2018-05-02", "2020-08-13"
+    _ours = set(permno_inventory["permno"])
+    _flags = pd.read_csv(_crsp / "metaflaginfo.csv", dtype=str)
+    _desc = dict(zip(_flags["flagtype"] + ":" + _flags["flagvalue"].fillna(""), _flags["flagdesc"]))
+
+    # Distributions: everything except cash payouts (dividends, capital gains, return of capital) and share-count observations
+    _DIS_KIND = {
+        "STKSPL": "split", "STKDIV": "stock dividend", "SECSO": "spin-off",
+        "SECMRG": "merger", "SECMWM": "merger", "SECUM": "merger", "SECSIM": "merger", "UMRGR": "merger",
+        "CPM": "merger", "CPSCM": "merger", "CPSCMO": "merger",
+        "SECEX": "exchange or reorganization", "SECRSD": "exchange or reorganization",
+        "CPEX": "exchange or reorganization", "CPEXCSH": "exchange or reorganization", "CPRCSH": "exchange or reorganization",
+        "CPFL": "liquidation", "CPPL": "liquidation", "CPSIL": "liquidation", "SECFL": "liquidation",
+        "SECPL": "liquidation", "SECSTL": "liquidation", "ULIQ": "liquidation",
+        "SECRD": "rights distribution", "URTSD": "rights distribution",
+    }
+    _d = pd.read_csv(_crsp / "stkdistributions.csv", dtype=str)
+    _d = _d[
+        _d["permno"].astype(int).isin(_ours)
+        & _d["disexdt"].between(_start, _end)
+        & ~_d["distype"].isin(["CD", "CG", "ROC", "SD", "TSOO"])
+    ]
+    _facshr = _d["disfacshr"].astype(float)
+    _dis = pd.DataFrame({
+        "permno": _d["permno"].astype(int),
+        "event_date": _d["disexdt"],
+        "declared_date": _d["disdeclaredt"],
+        "kind": _d["disdetailtype"].map(_DIS_KIND).fillna("other security distribution"),
+        "detail": ("AD:" + _d["disdetailtype"]).map(_desc),
+        "other_permno": _d["dispermno"].astype(float),
+        "source": "stkdistributions",
+    })
+    _is_split = _d["distype"].eq("FRS")
+    _dis.loc[_is_split, "detail"] += ", shares x" + (1 + _facshr[_is_split]).round(4).astype(str)
+    _dis.loc[_d["disdetailtype"].eq("STKSPL") & _facshr.lt(0), "kind"] = "reverse split"
+
+    # Delistings: CRSP gives the effective date only
+    _DEL_KIND = {"MER": "merger", "GEX": "exchange or reorganization", "GLI": "liquidation", "GDR": "delisted (dropped)"}
+    _x = pd.read_csv(_crsp / "stkdelists.csv", dtype=str)
+    _x = _x[_x["permno"].astype(int).isin(_ours) & _x["delistingdt"].between(_start, _end)]
+    _del = pd.DataFrame({
+        "permno": _x["permno"].astype(int),
+        "event_date": _x["delistingdt"],
+        "declared_date": None,
+        "kind": _x["delactiontype"].map(_DEL_KIND).fillna("delisted (other)"),
+        "detail": "delisted: " + ("CD:" + _x["delactiontype"]).map(_desc)
+        + "; reason: " + ("DR:" + _x["delreasontype"].fillna("")).map(_desc)
+        + "; paid in: " + ("PT:" + _x["delpaymenttype"].fillna("")).map(_desc).fillna("n/a"),
+        "other_permno": _x["delpermno"].astype(float),
+        "source": "stkdelists",
+    })
+
+    # Ticker, name and CUSIP changes: a new CRSP name record whose field differs from the one before; effective date only
+    _n = pd.read_csv(CRSP_NAMES_PATH, dtype=str, usecols=["permno", "namedt", "ticker", "issuernm", "cusip"])
+    _n["permno"] = _n["permno"].astype(int)
+    _n = _n[_n["permno"].isin(_ours)].sort_values(["permno", "namedt"])
+    _prev = _n.groupby("permno")[["ticker", "issuernm", "cusip"]].shift()
+    _new = (_n.groupby("permno").cumcount() > 0) & _n["namedt"].between(_start, _end)
+    _changes = []
+    for _col, _kind in [("ticker", "ticker change"), ("issuernm", "name change"), ("cusip", "CUSIP change")]:
+        _m = _new & _n[_col].fillna("").ne(_prev[_col].fillna(""))
+        _changes.append(pd.DataFrame({
+            "permno": _n.loc[_m, "permno"], "event_date": _n.loc[_m, "namedt"], "declared_date": None, "kind": _kind,
+            "detail": _prev.loc[_m, _col].fillna("") + " -> " + _n.loc[_m, _col].fillna(""),
+            "other_permno": float("nan"), "source": "stocknames_v2",
+        }))
+
+    _own = pd.concat([_dis, _del, *_changes], ignore_index=True)
+    _own["affected_as"] = "own event"
+    _own["other_permno"] = _own["other_permno"].where(_own["other_permno"].gt(0) & _own["other_permno"].ne(_own["permno"]))
+
+    # Counterparties: a stock whose shares were handed to another stock's holders (acquirer in a stock merger, new spin-off)
+    _cp = _own[_own["other_permno"].isin(_ours)].copy()
+    _cp["permno"], _cp["other_permno"] = _cp["other_permno"].astype(int), _cp["permno"].astype(float)
+    _cp["affected_as"] = "counterparty"
+
+    _ev = pd.concat([_own, _cp], ignore_index=True)
+    _ev["event_date"] = pd.to_datetime(_ev["event_date"])
+    _ev["declared_date"] = pd.to_datetime(_ev["declared_date"])
+    _ev["other_permno"] = _ev["other_permno"].astype("Int64")
+    _ev = pd.merge_asof(  # CRSP ticker on the event date
+        _ev.sort_values("event_date"),
+        _n.assign(namedt=pd.to_datetime(_n["namedt"]))[["permno", "namedt", "ticker"]].sort_values("namedt"),
+        left_on="event_date", right_on="namedt", by="permno",
+    ).drop(columns="namedt")
+    _ev["ticker"] = _ev["ticker"].fillna(_ev["permno"].map(_n.groupby("permno")["ticker"].first()))  # event before the first record
+    corporate_events = _ev[
+        ["permno", "ticker", "event_date", "declared_date", "kind", "affected_as", "detail", "other_permno", "source"]
+    ].sort_values(["permno", "event_date", "kind"]).reset_index(drop=True)
+    corporate_event_permnos = (
+        corporate_events.groupby("permno")
+        .agg(
+            ticker=("ticker", "last"),
+            n_events=("kind", "size"),
+            kinds=("kind", lambda s: ", ".join(sorted(s.unique()))),
+            first_event=("event_date", "min"),
+            last_event=("event_date", "max"),
+        )
+        .reset_index()
+    )
+
+    return corporate_event_permnos, corporate_events
+
+
+@app.cell
+def _(corporate_event_permnos, corporate_events, mo, permno_inventory):
+    _e = corporate_events
+    _by_kind = (
+        _e.groupby(["kind", "affected_as"])
+        .agg(
+            events=("permno", "size"),
+            permnos=("permno", "nunique"),
+            share_with_declared_date=("declared_date", lambda s: round(s.notna().mean(), 2)),
+        )
+        .reset_index()
+        .sort_values("permnos", ascending=False)
+    )
+    mo.vstack([
+        mo.md(f"""
+    - **Events:** {len(_e):,} on {_e["permno"].nunique():,} of {len(permno_inventory):,} PERMNOs ({_e["permno"].nunique() / len(permno_inventory):.0%})
+    - **With an announcement date:** {_e["declared_date"].notna().sum():,} of {len(_e):,}
+    """),
+        mo.md("**By kind**"),
+        mo.ui.table(_by_kind),
+        mo.md("**PERMNOs with events**"),
+        mo.ui.table(corporate_event_permnos),
+        mo.md("**All events**"),
+        mo.ui.table(corporate_events),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## C5: drops to zero
+
+    C1 and C2 handle zeros at the start of a series. Here the count falls to 0 later, after real readings. If a reading of 0 comes straight after one with 10 or more holders, that zero and the zeros right after it are flagged to be dropped, and the end of the zeros is a **break** as in C2: no daily change is taken across it.
+
+    Ten or more holders do not all close their positions in the hour between two sweeps, so these zeros are a recording failure and the true count during them is unknown, not 0. Most start the day a corporate event replaced the instrument: Eldorado Gold (`EGO`) reads 7,035 holders, does a reverse split on 2018-12-31, then reads 0 every hour until Robintrack refreshed its instrument list on 2020-01-16. The rest start on dates shared by several stocks, a fault on Robintrack's or Robinhood's side.
+
+    Drops from fewer holders are kept: a drop from 1 to 0 is the last holder selling, and the drops from 2 to 9 are thinly held funds with no corporate event. Any cut-off from 5 to 13 holders flags the same runs.
+    """)
+    return
+
+
+@app.cell
+def _(
+    c1_placeholder,
+    c2_placeholder,
+    c3_repeat,
+    corporate_events,
+    np,
+    pd,
+    permno_inventory,
+    rt_permno,
+    rt_ts,
+):
+    ZERO_DROP_MIN_HOLDERS = 10
+
+    _rows = np.flatnonzero(~(c1_placeholder | c2_placeholder | c3_repeat).to_numpy())  # rows still kept after C1 to C3
+    _p = rt_permno["permno"].to_numpy()[_rows]
+    _v = rt_permno["users_holding"].to_numpy()[_rows]
+    _ts = rt_ts.to_numpy()[_rows]
+    _file = rt_permno["source_file"].to_numpy()[_rows]
+    _same = np.r_[False, _p[1:] == _p[:-1]]
+    _prev = np.r_[0, _v[:-1]]
+    _start = _same & (_v == 0) & (_prev >= ZERO_DROP_MIN_HOLDERS)
+
+    # a run is its starting zero plus the zeros right after it in the same PERMNO
+    _new_group = ~_same | (_v != 0) | _start
+    _group_first = np.flatnonzero(_new_group)
+    _in_run = _start[_group_first][np.cumsum(_new_group) - 1]
+    _flag = np.zeros(len(rt_permno), dtype=bool)
+    _flag[_rows[_in_run]] = True
+    c5_zero_run = pd.Series(_flag, index=rt_permno.index)
+
+    _starts = np.flatnonzero(_start)
+    _group_last = np.flatnonzero(np.r_[_new_group[1:], True])
+    _ends = _group_last[np.searchsorted(_group_last, _starts)]
+    _after = np.minimum(_ends + 1, len(_p) - 1)
+    _recovers = (_ends + 1 < len(_p)) & (_p[_after] == _p[_starts])
+    c5_runs = pd.DataFrame({
+        "permno": _p[_starts],
+        "source_file": _file[_starts],
+        "holders_before": _prev[_starts],
+        "first_zero_ts": pd.to_datetime(_ts[_starts]).tz_localize("UTC"),
+        "last_zero_ts": pd.to_datetime(_ts[_ends]).tz_localize("UTC"),
+        "n_zeros": _ends - _starts + 1,
+        "holders_after": pd.Series(_v[_after], dtype="Int64").where(_recovers),
+        "first_ts_after": pd.to_datetime(np.where(_recovers, _ts[_after], np.datetime64("NaT", "us"))).tz_localize("UTC"),
+    })
+
+    # shown, not used as a rule: CRSP corporate events of the same PERMNO within 7 days of the first zero
+    _day = c5_runs["first_zero_ts"].dt.tz_convert("America/New_York").dt.tz_localize(None).dt.normalize()
+    _near = c5_runs[["permno"]].assign(day=_day).reset_index().merge(corporate_events[["permno", "event_date", "kind"]], on="permno")
+    _near = _near[(_near["event_date"] - _near["day"]).abs() <= pd.Timedelta(days=7)]
+    c5_runs["crsp_events_within_7_days"] = c5_runs.index.map(_near.groupby("index")["kind"].agg(lambda s: ", ".join(sorted(set(s))))).fillna("")
+    c5_runs["first_zero_day_ny"] = _day.dt.strftime("%Y-%m-%d")
+    c5_runs = c5_runs.merge(permno_inventory[["permno", "ticker", "issuernm", "securitytype"]], on="permno", how="left")
+
+    # every drop to 0 by the level it falls from, flagged or kept
+    _drop = _same & (_v == 0) & (_prev > 0)
+    c5_drops_by_level = pd.cut(_prev[_drop], [0, 1, ZERO_DROP_MIN_HOLDERS - 1, np.inf], labels=["1", f"2 to {ZERO_DROP_MIN_HOLDERS - 1}", f"{ZERO_DROP_MIN_HOLDERS} or more"]).value_counts().sort_index()
+
+    return c5_drops_by_level, c5_runs, c5_zero_run
+
+
+@app.cell
+def _(c5_drops_by_level, c5_runs, c5_zero_run, mo):
+    _r = c5_runs
+    _matched = _r["crsp_events_within_7_days"] != ""
+    _shared = _r.loc[~_matched, "first_zero_day_ny"].value_counts()
+    _d = c5_drops_by_level
+    mo.vstack([
+        mo.md(f"""
+    - **Runs flagged:** {len(_r):,} in {_r["permno"].nunique():,} PERMNOs, {c5_zero_run.sum():,} rows
+    - **Come back afterwards:** {_r["holders_after"].notna().sum():,}; stay at 0 until the series ends: {_r["holders_after"].isna().sum():,}
+    - **Within 7 days of a CRSP corporate event of the same PERMNO** (shown, not used as a rule): {_matched.sum():,} of {len(_r):,}; the others start on {", ".join(f"{d} ({n})" for d, n in _shared.items())}
+    - **All drops to 0 by the level they fall from:** {", ".join(f"from {k}: {v:,}" for k, v in _d.items())}; only the last group is flagged
+    """),
+        mo.ui.table(_r.sort_values("holders_before", ascending=False)),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## T1: daily close counts
+
+    One number per PERMNO per trading day: the first reading taken between 16:40 and 16:59 New York time (C4 explains the window), from the rows kept after C1 to C5. No reading in the window means no close that day. Readings on weekends and holidays are not used; the trading days come from CRSP's daily index file (`dsi.csv`).
+
+    Each close carries its **segment**. A new segment starts at every switch to another raw file (C2) and after every run of zeros (C5), and T2 never takes a change across two segments.
+    """)
+    return
+
+
+@app.cell
+def _(CRSP_NAMES_PATH, pd):
+    ALL_TRADING_DAYS = pd.DatetimeIndex(
+        pd.read_csv(CRSP_NAMES_PATH.parent / "dsi.csv", usecols=["date"], parse_dates=["date"])["date"]
+    ).sort_values()
+    TRADING_DAYS = ALL_TRADING_DAYS[(ALL_TRADING_DAYS >= "2018-05-02") & (ALL_TRADING_DAYS <= "2020-08-13")]
+
+    return ALL_TRADING_DAYS, TRADING_DAYS
+
+
+@app.cell
+def _(
+    CLOSE_WINDOW,
+    TRADING_DAYS,
+    c1_placeholder,
+    c2_placeholder,
+    c3_repeat,
+    c5_zero_run,
+    np,
+    pd,
+    rt_permno,
+    rt_ts,
+):
+    _drop = (c1_placeholder | c2_placeholder | c3_repeat | c5_zero_run).to_numpy()
+    _permno = rt_permno["permno"].to_numpy()
+    _file = rt_permno["source_file"].cat.codes.to_numpy()
+    _c5 = c5_zero_run.to_numpy()
+
+    # segments: a new one starts with each PERMNO, at each switch to another raw file (C2) and after each zero run (C5)
+    _new_segment = np.r_[True, (_permno[1:] != _permno[:-1]) | (_file[1:] != _file[:-1]) | (_c5[:-1] & ~_c5[1:])]
+    _segment = np.cumsum(_new_segment)
+
+    # readings in the close window; prefilter on the UTC clock (New York is UTC-4 in summer, UTC-5 in winter)
+    _sod = rt_ts.to_numpy().astype("datetime64[s]").astype(np.int64) % 86400
+    _lo, _hi = (int(w.total_seconds()) for w in CLOSE_WINDOW)
+    _near = np.zeros(len(_sod), dtype=bool)
+    for _h in (4, 5):
+        _near |= (_sod - _h * 3600 >= _lo) & (_sod - _h * 3600 < _hi)
+    _cand = np.flatnonzero(~_drop & _near)
+    _ny = pd.DatetimeIndex(rt_ts.to_numpy()[_cand]).tz_localize("UTC").tz_convert("America/New_York")
+    _clock = _ny - _ny.normalize()
+    _in = (_clock >= CLOSE_WINDOW[0]) & (_clock < CLOSE_WINDOW[1])
+    _idx = _cand[_in]
+    _window = pd.DataFrame({
+        "permno": _permno[_idx],
+        "date": _ny[_in].tz_localize(None).normalize(),
+        "close_ts": _ny[_in].tz_convert("UTC"),
+        "holders": rt_permno["users_holding"].to_numpy()[_idx],
+        "segment": _segment[_idx],
+    })
+    _trading = _window["date"].isin(TRADING_DAYS)
+    # rows are in time order within each PERMNO, so the first row of a PERMNO-day is its first reading in the window
+    t1_close = _window[_trading].drop_duplicates(["permno", "date"], keep="first").reset_index(drop=True)
+    t1_summary = pd.DataFrame({
+        "readings_in_window": [len(_window)],
+        "readings_on_non_trading_days": [int((~_trading).sum())],
+        "permno_days_with_close": [len(t1_close)],
+        "permno_days_with_2plus_readings": [int(_window[_trading].groupby(["permno", "date"]).size().gt(1).sum())],
+        "permnos_with_a_close": [t1_close["permno"].nunique()],
+        "trading_days": [len(TRADING_DAYS)],
+        "trading_days_without_any_close": [len(TRADING_DAYS.difference(pd.DatetimeIndex(t1_close["date"].unique())))],
+    })
+
+    return t1_close, t1_summary
+
+
+@app.cell
+def _(TRADING_DAYS, mo, plt, t1_close, t1_summary):
+    _s = t1_summary.iloc[0]
+    _per_day = t1_close.groupby("date").size().reindex(TRADING_DAYS, fill_value=0)
+    _fig, _ax = plt.subplots(figsize=(9, 3))
+    _ax.plot(_per_day.index, _per_day.to_numpy(), lw=0.8)
+    _ax.set_ylabel("PERMNOs with a close")
+    _ax.set_title("PERMNOs with a close count, by trading day")
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md(f"""
+    - **Closes:** {_s["permno_days_with_close"]:,} PERMNO-days, {_s["permnos_with_a_close"]:,} PERMNOs, {_s["trading_days"]:,} trading days
+    - **Trading days with no close for any PERMNO:** {_s["trading_days_without_any_close"]:,} (the outages in C4)
+    - **PERMNO-days with two or more readings in the window:** {_s["permno_days_with_2plus_readings"]:,}; the first is used
+    - **Window readings on weekends and holidays, not used:** {_s["readings_on_non_trading_days"]:,}
+    """),
+        _fig,
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## T2: daily changes
+
+    The change in holders from the previous trading day's close to today's. It is taken only when both closes exist, they are in the same segment and the previous close is above 0; otherwise it is missing and `status` says why.
+
+    Everything here is mechanical. The choices made by looking at the data (the target's units, holder floors, winsorizing, which stocks to demean across, and the corporate-event exclusions) wait for the train/test split. The RTX restart shows why the corporate-event exclusion is needed: after the break on 2020-04-03 the new instrument climbs 2,323, 4,561, 6,575, 8,201 holders, positions moved over from UTX rather than buying.
+    """)
+    return
+
+
+@app.cell
+def _(TRADING_DAYS, np, pd, t1_close):
+    _c = t1_close.sort_values(["permno", "date"]).reset_index(drop=True)
+    _day_no = pd.Series(TRADING_DAYS.get_indexer(_c["date"]))
+    _same_permno = _c["permno"].eq(_c["permno"].shift())
+    _prev = _c["holders"].shift()
+    _status = np.select(
+        [
+            ~_same_permno,
+            _day_no.diff().ne(1),
+            _c["segment"].ne(_c["segment"].shift()),
+            _prev.eq(0),
+        ],
+        [
+            "first close of the PERMNO",
+            "previous trading day has no close",
+            "break since the previous close",
+            "previous close is 0",
+        ],
+        default="ok",
+    )
+    _ok = _status == "ok"
+    t2_change = _c.assign(
+        holders_prev=_prev.where(_ok).astype("Int64"),
+        change=(_c["holders"] - _prev).where(_ok).astype("Int64"),
+        status=_status,
+    )
+
+    return (t2_change,)
+
+
+@app.cell
+def _(mo, t2_change):
+    _st = t2_change["status"].value_counts().rename_axis("status").reset_index(name="permno_days")
+    _st["share"] = (_st["permno_days"] / len(t2_change)).round(4)
+    mo.vstack([
+        mo.md(f"**Daily changes:** {int((t2_change['status'] == 'ok').sum()):,} of {len(t2_change):,} PERMNO-days with a close"),
+        mo.ui.table(_st),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## CRSP daily data
+
+    Each PERMNO-day from T2 gets CRSP's daily stock data (`stkdlysecuritydata`), joined on PERMNO and date. Every column says when it is known:
+
+    - **`*_prev`**: the previous trading day (return, price, open, high, low, close, volume, dollar volume, market cap). Known before the 15:50 cutoff on day t, so these can be inputs.
+    - **`*_t`**: day t itself. Known only after day t's 16:00 close, so they describe the day and are never inputs to a decision at 15:50 on day t. What happens on day t up to 15:50 will come from TAQ.
+    - **`ret_next`**: the total return from day t's close to the next trading day's close, which is what a market-on-close order sent before 15:50 earns. This is the return to predict. It is left missing when CRSP's return spans more than one trading day (`ret_next_span` starting with P) or is missing.
+
+    Prices are as traded, not split-adjusted: CRSP's adjustment factors are computed backward from today and would carry later splits back in time. When a stock did not trade, CRSP's price is the bid-ask midpoint, marked `BA` in `price_flag_*`.
+    """)
+    return
+
+
+@app.cell
+def _(ALL_TRADING_DAYS, CRSP_NAMES_PATH, pd, t2_change):
+    _names = {
+        "dlyret": "ret", "dlyretx": "retx", "dlyretdurflg": "ret_span", "dlyprc": "price", "dlyprcflg": "price_flag",
+        "dlyopen": "open", "dlyhigh": "high", "dlylow": "low", "dlyclose": "close", "dlyvol": "volume",
+        "dlyprcvol": "dollar_volume", "dlycap": "cap", "dlydelflg": "delisted",
+    }
+    _crsp = pd.read_csv(
+        CRSP_NAMES_PATH.parent / "stkdlysecuritydata_from_2017.csv", usecols=["permno", "dlycaldt", *_names], engine="pyarrow"
+    ).rename(columns={"dlycaldt": "date", **_names})
+    _crsp = _crsp[_crsp["permno"].isin(set(t2_change["permno"]))]
+    _crsp["date"] = pd.to_datetime(_crsp["date"])
+
+    _pos = ALL_TRADING_DAYS.get_indexer(t2_change["date"])
+    daily = (
+        t2_change.assign(prev_day=ALL_TRADING_DAYS[_pos - 1], next_day=ALL_TRADING_DAYS[_pos + 1])
+        .merge(_crsp.add_suffix("_prev").rename(columns={"permno_prev": "permno", "date_prev": "prev_day"}), on=["permno", "prev_day"], how="left")
+        .merge(_crsp.add_suffix("_t").rename(columns={"permno_t": "permno", "date_t": "date"}), on=["permno", "date"], how="left")
+        .merge(
+            _crsp[["permno", "date", "ret", "ret_span"]].rename(columns={"date": "next_day", "ret": "ret_next", "ret_span": "ret_next_span"}),
+            on=["permno", "next_day"], how="left",
+        )
+    )
+    # one trading day only (D1 to D4 by calendar days, DU for long closures, DD for a delisting return)
+    daily["ret_next"] = daily["ret_next"].where(daily["ret_next_span"].str.fullmatch(r"D[1-4UD]").fillna(False))
+
+    return (daily,)
+
+
+@app.cell
+def _(daily, mo, pd):
+    _n = len(daily)
+    _span = daily["ret_next_span"]
+    _rows = [
+        ("PERMNO-days (all T2 rows)", _n),
+        ("with a CRSP row on day t", int(daily["delisted_t"].notna().sum())),
+        ("with a CRSP row on the previous trading day", int(daily["delisted_prev"].notna().sum())),
+        ("ret_next available (one trading day)", int(daily["ret_next"].notna().sum())),
+        ("ret_next missing: no CRSP row the next day", int(_span.isna().sum())),
+        ("ret_next missing: spans several trading days", int(_span.str.startswith("P").fillna(False).sum())),
+        ("ret_next missing: CRSP has no return (MR)", int(_span.eq("MR").fillna(False).sum())),
+        ("day t price is a bid-ask midpoint (BA)", int(daily["price_flag_t"].eq("BA").fillna(False).sum())),
+    ]
+    mo.vstack([
+        mo.md("**Coverage of the join** (counts only)"),
+        mo.ui.table(pd.DataFrame(_rows, columns=["", "permno_days"]).assign(share=lambda d: (d["permno_days"] / _n).round(4))),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Sample filters from the literature
+
+    Each filter is applied row by row with what was known before the 15:50 cutoff on day t, so a stock is never dropped for its whole history because of something that happens later. Rows are flagged, not deleted; `in_sample` marks the rows used from here on.
+
+    | Column | Rule | From | Point-in-time form |
+    |---|---|---|---|
+    | `price_ok` | price of at least $1 | Eaton et al. (the price on day t-1) | CRSP price on the previous trading day |
+    | `holders_ok` | at least 100 Robinhood holders | Barber et al. (`users_close(t-1) >= 100`); Eaton et al. use 50 | close count on the previous trading day |
+    | `is_common` | common stock, CRSP share code 10 or 11 | Ardia et al., Da, Fang & Lin, Eaton et al. | CRSP's classification on day t: equity, common, ordinary shares, US-incorporated, not a REIT |
+    | `major_exchange` | NYSE, NYSE American or Nasdaq | Da, Fang & Lin (exchange codes 1 to 3) | CRSP's primary exchange on day t |
+
+    `in_sample` applies the price filter only. The holder, common-stock and exchange columns are recorded but not applied: the holder floor is on hold, and funds stay in for now with `is_common` as the dummy.
+
+    Not adopted, because they decide on a stock's whole history using later information: dropping stocks with a gap of more than 7 trading days or a series that never changes (Ardia et al.), dropping every stock that split (Da, Fang & Lin), and a price screen at one fixed date (Da, Fang & Lin, end of November 2019). Winsorizing (1% or 0.1% tails) waits for the target's units and is set on the training period.
+    """)
+    return
+
+
+@app.cell
+def _(CRSP_NAMES_PATH, daily, pd):
+    PRICE_MIN, HOLDERS_MIN = 1.0, 100
+
+    _names = pd.read_csv(
+        CRSP_NAMES_PATH,
+        usecols=["permno", "namedt", "nameenddt", "securitytype", "securitysubtype", "sharetype", "usincflg", "issuertype", "primaryexch"],
+        parse_dates=["namedt", "nameenddt"],
+    ).sort_values("namedt")
+    _cls = pd.merge_asof(  # the CRSP name record in force on day t
+        daily[["permno", "date"]].reset_index().sort_values("date"), _names, left_on="date", right_on="namedt", by="permno"
+    )
+    _cls = _cls[_cls["date"] <= _cls["nameenddt"]].set_index("index").reindex(daily.index)
+    panel = daily.assign(
+        price_ok=daily["price_prev"].ge(PRICE_MIN),
+        holders_ok=daily["holders_prev"].ge(HOLDERS_MIN).fillna(False).astype(bool),
+        is_common=(
+            _cls["securitytype"].eq("EQTY") & _cls["securitysubtype"].eq("COM") & _cls["sharetype"].eq("NS")
+            & _cls["usincflg"].eq("Y") & _cls["issuertype"].eq("CORP")
+        ).fillna(False).astype(bool),
+        major_exchange=_cls["primaryexch"].isin(["N", "A", "Q"]),
+    )
+    panel["in_sample"] = panel["price_ok"]  # the holder floor is on hold
+
+    return (panel,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Train/test split
+
+    From here on, everything chosen by looking at values (the target's units, holder floors, winsorizing, which stocks to demean across, the corporate-event exclusion windows) is decided on the training period only, then applied unchanged to the test period.
+
+    - **Train:** trading days 2018-05-02 to 2019-12-11.
+    - **Test:** trading days 2019-12-12 to 2020-08-13. It starts the day Robinhood launched fractional shares, so it checks whether Model 1 survives that break; it also holds the January 2020 outage and the COVID period.
+
+    Changes are assigned by their date: the change on 2019-12-12 (from the 2019-12-11 close) is a test row. Test is only counted here. No cell looks at its values until the training-period choices are frozen.
+    """)
+    return
+
+
+@app.cell
+def _(panel, pd):
+    SPLIT_DATE = pd.Timestamp("2019-12-12")  # first test day: Robinhood's fractional shares launch
+    panel_train = panel[panel["date"] < SPLIT_DATE].reset_index(drop=True)
+    panel_test = panel[panel["date"] >= SPLIT_DATE].reset_index(drop=True)
+    return SPLIT_DATE, panel_test, panel_train
+
+
+@app.cell
+def _(SPLIT_DATE, TRADING_DAYS, mo, panel_test, panel_train, pd):
+    _sizes = pd.DataFrame([
+        {
+            "set": _name,
+            "first_day": _days.min().date(),
+            "last_day": _days.max().date(),
+            "trading_days": len(_days),
+            "permno_days_with_close": len(_t),
+            "usable_changes": int((_t["status"] == "ok").sum()),
+            "with_ret_next": int(_t["ret_next"].notna().sum()),
+            "permnos": _t["permno"].nunique(),
+        }
+        for _name, _t, _days in (
+            ("train", panel_train, TRADING_DAYS[TRADING_DAYS < SPLIT_DATE]),
+            ("test", panel_test, TRADING_DAYS[TRADING_DAYS >= SPLIT_DATE]),
+        )
+    ])
+    mo.vstack([mo.md("**Sizes only** (no values are summarized for test)"), mo.ui.table(_sizes)])
+
+    return
+
+
+@app.cell
+def _(mo, panel_train, pd):
+    _ok = panel_train["status"].eq("ok")
+    _in = _ok & panel_train["in_sample"]
+    _rows = [
+        {"filter": _c, "usable_changes_passing": int((_ok & panel_train[_c]).sum()), "share": round(float(panel_train.loc[_ok, _c].mean()), 4)}
+        for _c in ("price_ok", "holders_ok", "is_common", "major_exchange", "in_sample")
+    ]
+    mo.vstack([
+        mo.md(f"""
+    **Sample filters on train.** Usable changes: {int(_ok.sum()):,}. In sample (price filter): {int(_in.sum()):,} on {panel_train.loc[_in, "permno"].nunique():,} PERMNOs, a median of {int(panel_train[_in].groupby("date").size().median()):,} per trading day.
+    """),
+        mo.ui.table(pd.DataFrame(_rows)),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Distributions on train
+
+    In-sample training rows (CRSP price of at least $1 the day before). Two variables:
+
+    - **Return:** `ret_next`, the total return from day t's close to the next trading day's close.
+    - **Change in Robinhood holders:** `change / holders_prev`, the percentage change from the previous trading day's close count to day t's, on rows whose change is usable (T2 status `ok`, so the previous close is above 0).
+
+    Left: the middle 98% of each distribution. Right: the tails, as the share of observations at least as far out as each value, on log scales (a straight line means a power-law tail).
+    """)
+    return
+
+
+@app.cell
+def _(panel_train, pd):
+    _in = panel_train["in_sample"]
+    _pct = (panel_train["change"] / panel_train["holders_prev"]).astype(float).where(panel_train["status"].eq("ok"))
+    dist_train = pd.DataFrame({"return": panel_train.loc[_in, "ret_next"], "holders_pct_change": _pct[_in]})
+
+
+    def _stats(s):
+        s = s.dropna()
+        q = s.quantile([0.001, 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99, 0.999])
+        return pd.Series({
+            "count": len(s),
+            "mean": s.mean(),
+            "std": s.std(),
+            "skew": s.skew(),
+            "excess_kurtosis": s.kurt(),
+            "min": s.min(),
+            **{f"p{100 * k:g}": v for k, v in q.items()},
+            "max": s.max(),
+            "share_exactly_0": (s == 0).mean(),
+        })
+
+
+    dist_summary = pd.DataFrame({c: _stats(dist_train[c]) for c in dist_train})
+
+    return dist_summary, dist_train
+
+
+@app.cell
+def _(dist_train, np, plt):
+    _fig, _axes = plt.subplots(2, 2, figsize=(12, 7))
+    _labels = {"return": "Return, close t to close t+1", "holders_pct_change": "Change in Robinhood holders"}
+    for _row, (_col, _label) in enumerate(_labels.items()):
+        _s = dist_train[_col].dropna()
+        _lo, _hi = _s.quantile([0.01, 0.99])
+        _ax = _axes[_row, 0]
+        _ax.hist(_s[_s.between(_lo, _hi)], bins=200)
+        _ax.set_title(f"{_label}: middle 98%")
+        _ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1%}"))
+        _ax.set_ylabel("PERMNO-days")
+        _ax = _axes[_row, 1]
+        for _side, _v in (("up", _s[_s > 0].to_numpy()), ("down", -_s[_s < 0].to_numpy())):
+            _v = np.sort(_v)
+            _keep = np.unique(np.geomspace(1, len(_v), 3000).astype(int)) - 1  # thin the points evenly on the log scale
+            _ax.loglog(_v[_keep], (len(_v) - _keep) / len(_s), label=_side)
+        _ax.set_title(f"{_label}: tails")
+        _ax.set_xlabel("size of the move (1 = 100%)")
+        _ax.set_ylabel("share at least this far out")
+        _ax.legend()
+    _fig.tight_layout()
+    _fig
+
+    return
+
+
+@app.cell
+def _(dist_summary, mo):
+    mo.vstack([
+        mo.md("**Summary statistics on train** (in-sample rows)"),
+        mo.ui.table(dist_summary.reset_index(names="statistic").round(6), selection=None),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Write the panel
+
+    `panel_train` and `panel_test` go to separate files, so later work can read the training file without ever opening the test one. Written only when every check passes and the button is pressed.
+    """)
+    return
+
+
+@app.cell
+def _(SPLIT_DATE, TRADING_DAYS, mo, panel, panel_test, panel_train, pd):
+    _all = pd.concat([panel_train, panel_test])
+    _checks = [
+        ("one row per PERMNO and date", not _all.duplicated(["permno", "date"]).any()),
+        ("every date is a trading day in the Robintrack period", bool(_all["date"].isin(TRADING_DAYS).all())),
+        ("train ends before the split, test starts on it",
+         bool(panel_train["date"].max() < SPLIT_DATE <= panel_test["date"].min())),
+        ("train and test add up to the whole panel", len(panel_train) + len(panel_test) == len(panel)),
+        ("holders are never negative", bool((_all["holders"] >= 0).all())),
+        ("a change exists only where status is ok", bool((_all["change"].notna() == _all["status"].eq("ok")).all())),
+    ]
+    panel_checks = pd.DataFrame(_checks, columns=["check", "passed"])
+    write_panel = mo.ui.run_button(label="Write panel_train and panel_test")
+    mo.vstack([mo.ui.table(panel_checks, selection=None), write_panel])
+
+    return panel_checks, write_panel
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    INTERMEDIATE_DIR,
+    mo,
+    panel_checks,
+    panel_test,
+    panel_train,
+    write_panel,
+):
+    mo.stop(not panel_checks["passed"].all(), mo.md("**Not written:** a check failed."))
+    mo.stop(not write_panel.value, mo.md("Press the button to write."))
+    _dir = INTERMEDIATE_DIR / "clean"
+    _dir.mkdir(parents=True, exist_ok=True)
+    for _name, _df in (("panel_train", panel_train), ("panel_test", panel_test)):
+        _part = _dir / f"{_name}.parquet.part"
+        _df.to_parquet(_part, index=False)
+        _part.rename(_dir / f"{_name}.parquet")
+    mo.md(f"Written to `{_dir.relative_to(DATA_DIR.parent)}`: {len(panel_train):,} train rows, {len(panel_test):,} test rows.")
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Checks before writing
+
+    Run on exactly the rows that will be written (everything not flagged by C1, C2, C3 or C5). The write step refuses to run unless every check passes.
+    """)
+    return
+
+
+@app.cell
+def _(
+    c1_placeholder,
+    c2_placeholder,
+    c3_repeat,
+    c5_zero_run,
+    mo,
+    np,
+    pd,
+    rt_permno,
+    rt_ts,
+):
+    _keep = ~(c1_placeholder | c2_placeholder | c3_repeat | c5_zero_run).to_numpy()
     _perm = rt_permno["permno"].to_numpy()[_keep]
     _ts = rt_ts.to_numpy()[_keep]
     _holders = rt_permno["users_holding"].to_numpy()[_keep]
