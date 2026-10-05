@@ -794,7 +794,6 @@ def _(c1_placeholder, c2_placeholder, np, pd, rt_permno, rt_ts):
         "longest_gap_min": [round(float(_gap_to_kept.max()) / 60, 1)],
         "same_value_as_kept": [int((_v[_kept] == _v[_flagged]).sum())],
     })
-
     return c3_repeat, c3_summary
 
 
@@ -1002,7 +1001,6 @@ def _(CRSP_NAMES_PATH, pd, permno_inventory):
         )
         .reset_index()
     )
-
     return corporate_event_permnos, corporate_events
 
 
@@ -1031,7 +1029,6 @@ def _(corporate_event_permnos, corporate_events, mo, permno_inventory):
         mo.md("**All events**"),
         mo.ui.table(corporate_events),
     ])
-
     return
 
 
@@ -1107,7 +1104,6 @@ def _(
     # every drop to 0 by the level it falls from, flagged or kept
     _drop = _same & (_v == 0) & (_prev > 0)
     c5_drops_by_level = pd.cut(_prev[_drop], [0, 1, ZERO_DROP_MIN_HOLDERS - 1, np.inf], labels=["1", f"2 to {ZERO_DROP_MIN_HOLDERS - 1}", f"{ZERO_DROP_MIN_HOLDERS} or more"]).value_counts().sort_index()
-
     return c5_drops_by_level, c5_runs, c5_zero_run
 
 
@@ -1126,7 +1122,6 @@ def _(c5_drops_by_level, c5_runs, c5_zero_run, mo):
     """),
         mo.ui.table(_r.sort_values("holders_before", ascending=False)),
     ])
-
     return
 
 
@@ -1148,7 +1143,6 @@ def _(CRSP_NAMES_PATH, pd):
         pd.read_csv(CRSP_NAMES_PATH.parent / "dsi.csv", usecols=["date"], parse_dates=["date"])["date"]
     ).sort_values()
     TRADING_DAYS = ALL_TRADING_DAYS[(ALL_TRADING_DAYS >= "2018-05-02") & (ALL_TRADING_DAYS <= "2020-08-13")]
-
     return ALL_TRADING_DAYS, TRADING_DAYS
 
 
@@ -1204,7 +1198,6 @@ def _(
         "trading_days": [len(TRADING_DAYS)],
         "trading_days_without_any_close": [len(TRADING_DAYS.difference(pd.DatetimeIndex(t1_close["date"].unique())))],
     })
-
     return t1_close, t1_summary
 
 
@@ -1226,7 +1219,6 @@ def _(TRADING_DAYS, mo, plt, t1_close, t1_summary):
     """),
         _fig,
     ])
-
     return
 
 
@@ -1269,7 +1261,6 @@ def _(TRADING_DAYS, np, pd, t1_close):
         change=(_c["holders"] - _prev).where(_ok).astype("Int64"),
         status=_status,
     )
-
     return (t2_change,)
 
 
@@ -1281,7 +1272,6 @@ def _(mo, t2_change):
         mo.md(f"**Daily changes:** {int((t2_change['status'] == 'ok').sum()):,} of {len(t2_change):,} PERMNO-days with a close"),
         mo.ui.table(_st),
     ])
-
     return
 
 
@@ -1326,7 +1316,6 @@ def _(ALL_TRADING_DAYS, CRSP_NAMES_PATH, pd, t2_change):
     )
     # one trading day only (D1 to D4 by calendar days, DU for long closures, DD for a delisting return)
     daily["ret_next"] = daily["ret_next"].where(daily["ret_next_span"].str.fullmatch(r"D[1-4UD]").fillna(False))
-
     return (daily,)
 
 
@@ -1348,7 +1337,6 @@ def _(daily, mo, pd):
         mo.md("**Coverage of the join** (counts only)"),
         mo.ui.table(pd.DataFrame(_rows, columns=["", "permno_days"]).assign(share=lambda d: (d["permno_days"] / _n).round(4))),
     ])
-
     return
 
 
@@ -1396,8 +1384,61 @@ def _(CRSP_NAMES_PATH, daily, pd):
         major_exchange=_cls["primaryexch"].isin(["N", "A", "Q"]),
     )
     panel["in_sample"] = panel["price_ok"]  # the holder floor is on hold
-
     return (panel,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Features
+
+    For now one feature: the percentage change in Robinhood holders, $h_t / h_{t-1} - 1$ from T2's close counts (missing unless T2's status is `ok`), in two timings.
+
+    | Feature | Definition | Known |
+    |---|---|---|
+    | `rh_pct_lag1` | the change on day t-1 (from day t-2's close to day t-1's) | by 15:50 on day t, so usable as an input (`FEATURES_AT_1550`) |
+    | `rh_pct_t` | the change on day t | only after day t's close, so for the upper-bound test only (`FEATURES_AFTER_CLOSE`) |
+
+    Each also comes cross-sectionally demeaned (`rh_pct_lag1_dm`, `rh_pct_t_dm`): minus that day's mean over the universe (`in_universe`: a usable change, a price of at least $1 and at least 100 holders at the previous close); outside the universe they are missing. The mean uses only day t's rows, so the demeaned `rh_pct_lag1_dm` is still known by 15:50. Winsorized versions (`rh_pct_lag1_wdm`, `rh_pct_t_wdm`) are first clipped at that day's 1st and 99th percentiles within the universe, then demeaned, as Model 1's target is. The return to predict is demeaned the same way: `ret_next_dm` is `ret_next` minus the universe's mean on that day. `rh_pct_lag1` is taken from the previous trading day only; if that day had no usable change, it is missing. Built on the whole panel before the split; each row uses only its own past.
+    """)
+
+    return
+
+
+@app.cell
+def _(panel):
+    _pct = (panel["change"] / panel["holders_prev"]).astype(float).where(panel["status"].eq("ok"))
+    _lag = panel[["permno", "date"]].assign(rh_pct_lag1=_pct).rename(columns={"date": "prev_day"})
+    panel_x = panel.assign(rh_pct_t=_pct).merge(_lag, on=["permno", "prev_day"], how="left")  # prev_day: the previous trading day
+    # the universe: price of at least $1 and 100+ holders at the previous close, both known before day t
+    panel_x["in_universe"] = panel_x["price_ok"] & panel_x["holders_ok"] & panel_x["status"].eq("ok")
+    # cross-sectionally demeaned within the universe on day t (only day t's rows, so still point in time)
+    for _f in ("rh_pct_t", "rh_pct_lag1"):
+        _v = panel_x[_f].where(panel_x["in_universe"])
+        panel_x[f"{_f}_dm"] = _v - _v.groupby(panel_x["date"]).transform("mean")
+        # winsorized within the universe on day t at that day's 1st and 99th percentiles, then demeaned
+        _q = _v.groupby(panel_x["date"]).quantile([0.01, 0.99]).unstack()
+        _w = _v.clip(panel_x["date"].map(_q[0.01]), panel_x["date"].map(_q[0.99]))
+        panel_x[f"{_f}_wdm"] = _w - _w.groupby(panel_x["date"]).transform("mean")
+    # the return to predict, demeaned the same way: minus the universe's mean next-day return (a label, known after t+1's close)
+    _r = panel_x["ret_next"].where(panel_x["in_universe"])
+    panel_x["ret_next_dm"] = _r - _r.groupby(panel_x["date"]).transform("mean")
+    FEATURES_AT_1550 = ["rh_pct_lag1", "rh_pct_lag1_dm", "rh_pct_lag1_wdm"]
+    FEATURES_AFTER_CLOSE = ["rh_pct_t", "rh_pct_t_dm", "rh_pct_t_wdm"]
+    return FEATURES_AFTER_CLOSE, FEATURES_AT_1550, panel_x
+
+
+@app.cell
+def _(FEATURES_AFTER_CLOSE, FEATURES_AT_1550, SPLIT_DATE, mo, panel_x, pd):
+    _tr = panel_x[panel_x["date"] < SPLIT_DATE]
+    _cov = pd.DataFrame({
+        "feature": FEATURES_AT_1550 + FEATURES_AFTER_CLOSE,
+        "known": ["by 15:50 on day t"] * len(FEATURES_AT_1550) + ["after day t's close"] * len(FEATURES_AFTER_CLOSE),
+    })
+    _cov["share_available_on_train"] = [round(float(_tr[f].notna().mean()), 3) for f in _cov["feature"]]
+    mo.vstack([mo.md("**Features** (availability on train rows)"), mo.ui.table(_cov, selection=None, page_size=30)])
+
+    return
 
 
 @app.cell
@@ -1416,10 +1457,10 @@ def _(mo):
 
 
 @app.cell
-def _(panel, pd):
+def _(panel_x, pd):
     SPLIT_DATE = pd.Timestamp("2019-12-12")  # first test day: Robinhood's fractional shares launch
-    panel_train = panel[panel["date"] < SPLIT_DATE].reset_index(drop=True)
-    panel_test = panel[panel["date"] >= SPLIT_DATE].reset_index(drop=True)
+    panel_train = panel_x[panel_x["date"] < SPLIT_DATE].reset_index(drop=True)
+    panel_test = panel_x[panel_x["date"] >= SPLIT_DATE].reset_index(drop=True)
     return SPLIT_DATE, panel_test, panel_train
 
 
@@ -1442,7 +1483,6 @@ def _(SPLIT_DATE, TRADING_DAYS, mo, panel_test, panel_train, pd):
         )
     ])
     mo.vstack([mo.md("**Sizes only** (no values are summarized for test)"), mo.ui.table(_sizes)])
-
     return
 
 
@@ -1460,7 +1500,6 @@ def _(mo, panel_train, pd):
     """),
         mo.ui.table(pd.DataFrame(_rows)),
     ])
-
     return
 
 
@@ -1503,7 +1542,6 @@ def _(panel_train, pd):
 
 
     dist_summary = pd.DataFrame({c: _stats(dist_train[c]) for c in dist_train})
-
     return dist_summary, dist_train
 
 
@@ -1530,7 +1568,6 @@ def _(dist_train, np, plt):
         _ax.legend()
     _fig.tight_layout()
     _fig
-
     return
 
 
@@ -1539,6 +1576,167 @@ def _(dist_summary, mo):
     mo.vstack([
         mo.md("**Summary statistics on train** (in-sample rows)"),
         mo.ui.table(dist_summary.reset_index(names="statistic").round(6), selection=None),
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Holder floors and the target's units (train)
+
+    In-sample training rows with a usable change, from the previous trading day's close count $h_0$ to day t's $h_1$, in three units:
+
+    - **% change:** $h_1 / h_0 - 1$
+    - **log change:** $\log(h_1 / h_0)$; undefined when $h_1 = 0$, so those rows drop out of this unit
+    - **change in log(1 + holders):** $\log(1 + h_1) - \log(1 + h_0)$; defined everywhere
+
+    Each is shown under floors on the previous close ($h_0 \geq$ floor), the point-in-time form of Barber et al.'s `users_close(t-1) >= 100`. A floor of 1 is no floor: a change already needs a previous close above 0. Kurtosis is unstable with tails this heavy, so the table also gives it after clipping the 0.1% tails.
+    """)
+
+    return
+
+
+@app.cell
+def _(np, panel_train, pd):
+    HOLDER_FLOORS = [1, 10, 50, 100, 500, 1000]
+
+    _t = panel_train[panel_train["in_sample"] & panel_train["status"].eq("ok")]
+    _h0 = _t["holders_prev"].astype(float)
+    _h1 = _t["holders"].astype(float)
+    units_train = pd.DataFrame({
+        "date": _t["date"],
+        "holders_prev": _h0,
+        "pct_change": _h1 / _h0 - 1,
+        "log_change": np.log(_h1.where(_h1 > 0) / _h0),
+        "log1p_change": np.log1p(_h1) - np.log1p(_h0),
+    })
+
+
+    def _stats(s):
+        s = s.dropna()
+        lo, hi = s.quantile([0.001, 0.999])
+        q = s.quantile([0.001, 0.01, 0.5, 0.99, 0.999])
+        return {
+            "count": len(s),
+            "std": s.std(),
+            "skew": s.skew(),
+            "excess_kurtosis": s.kurt(),
+            "excess_kurtosis_clip_0.1%": s.clip(lo, hi).kurt(),
+            **{f"p{100 * k:g}": v for k, v in q.items()},
+            "min": s.min(),
+            "max": s.max(),
+            "share_exactly_0": (s == 0).mean(),
+        }
+
+
+    floor_summary = pd.DataFrame([
+        {
+            "unit": _u,
+            "floor": _f,
+            "permnos_per_day": int(units_train[units_train["holders_prev"] >= _f].groupby("date").size().median()),
+            **_stats(units_train.loc[units_train["holders_prev"] >= _f, _u]),
+        }
+        for _u in ("pct_change", "log_change", "log1p_change")
+        for _f in HOLDER_FLOORS
+    ])
+
+    return floor_summary, units_train
+
+
+@app.cell
+def _(np, plt, units_train):
+    _units = {"pct_change": "% change", "log_change": "log change", "log1p_change": "change in log(1 + holders)"}
+    _show = [1, 50, 100, 1000]
+    _fig, _axes = plt.subplots(3, 2, figsize=(12, 11))
+    for _row, (_u, _label) in enumerate(_units.items()):
+        _lo, _hi = units_train[_u].quantile([0.01, 0.99])
+        _bins = np.linspace(_lo, _hi, 151)
+        for _f in _show:
+            _s = units_train.loc[units_train["holders_prev"] >= _f, _u].dropna()
+            _axes[_row, 0].hist(_s[_s.between(_lo, _hi)], bins=_bins, density=True, histtype="step", log=True, label=f"floor {_f}")
+            _x = np.sort(_s.abs().to_numpy())
+            _x = _x[_x > 0]
+            _keep = np.unique(np.geomspace(1, len(_x), 2000).astype(int)) - 1
+            _axes[_row, 1].loglog(_x[_keep], (len(_x) - _keep) / len(_s), label=f"floor {_f}")
+        _axes[_row, 0].set_title(f"{_label}: middle 98% without a floor (density, log scale)")
+        _axes[_row, 1].set_title(f"{_label}: tails of the size of the move")
+        _axes[_row, 1].set_ylabel("share at least this far out")
+        for _ax in _axes[_row]:
+            _ax.legend(fontsize=8)
+    _fig.tight_layout()
+    _fig
+
+    return
+
+
+@app.cell
+def _(floor_summary, mo):
+    mo.vstack([
+        mo.md("**By unit and floor** (train, in-sample rows with a usable change)"),
+        mo.ui.table(floor_summary.round(4), selection=None, page_size=20),
+    ])
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Model 1's target
+
+    Chosen on train above, and applied with the same fixed rules to train and test separately; the test result is never summarized.
+
+    1. **Rows:** a usable change (T2 status `ok`), a CRSP price of at least $1 the day before (`in_sample`), and at least 100 holders at the previous close (`holders_ok`, Barber et al.'s `users_close(t-1) >= 100`). These rows are `in_target`, the same rows as `in_universe`, and only they are kept: stocks outside the universe are not in the clean files.
+    2. **Unit:** `y_raw` $= \log(1 + h_t) - \log(1 + h_{t-1})$, the change in log holders from the previous close to day t's.
+    3. **Clip within the day:** `y_clipped` is clipped at that day's 1st and 99th cross-sectional percentiles, so each day uses only its own cross-section.
+    4. **Demean within the day:** `y` is `y_clipped` minus that day's cross-sectional mean.
+
+    `y` is known only after day t's close: a label, never an input.
+    """)
+
+    return
+
+
+@app.cell
+def _(np, panel_test, panel_train):
+    CLIP_QUANTILES = (0.01, 0.99)
+
+
+    def _with_target(df):
+        """Add Model 1's target; every step uses only the row's own day."""
+        in_target = df["in_sample"] & df["holders_ok"] & df["status"].eq("ok")
+        y_raw = (np.log1p(df["holders"].astype(float)) - np.log1p(df["holders_prev"].astype(float))).where(in_target)
+        q = y_raw.groupby(df["date"]).quantile(list(CLIP_QUANTILES)).unstack()
+        y_clipped = y_raw.clip(df["date"].map(q[CLIP_QUANTILES[0]]), df["date"].map(q[CLIP_QUANTILES[1]]))
+        y = y_clipped - y_clipped.groupby(df["date"]).transform("mean")
+        return df.assign(in_target=in_target, y_raw=y_raw, y_clipped=y_clipped, y=y)
+
+
+    panel_train_out = _with_target(panel_train).query("in_target").reset_index(drop=True)
+    panel_test_out = _with_target(panel_test).query("in_target").reset_index(drop=True)  # same fixed rules; not looked at
+
+    return panel_test_out, panel_train_out
+
+
+@app.cell
+def _(mo, panel_train_out, plt):
+    _t = panel_train_out[panel_train_out["in_target"]]
+    _per_day = _t.groupby("date").size()
+    _fig, _ax = plt.subplots(figsize=(8, 3))
+    _ax.hist(_t["y"], bins=200)
+    _ax.set_title("Model 1's target y (train)")
+    _ax.set_ylabel("PERMNO-days")
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md(f"""
+    **Train only.**
+
+    - **Rows in the target:** {len(_t):,} PERMNO-days, {_t["permno"].nunique():,} PERMNOs, {len(_per_day):,} days; a median of {int(_per_day.median()):,} PERMNOs per day (smallest day {_per_day.min():,} on {_per_day.idxmin():%Y-%m-%d})
+    - **Clipped:** {int((_t["y_raw"] != _t["y_clipped"]).sum()):,} rows ({(_t["y_raw"] != _t["y_clipped"]).mean():.1%})
+    - **y:** std {_t["y"].std():.4f}, excess kurtosis {_t["y"].kurt():.1f}, range {_t["y"].min():.3f} to {_t["y"].max():.3f}; largest absolute daily mean {_t.groupby("date")["y"].mean().abs().max():.1e}
+    """),
+        _fig,
     ])
 
     return
@@ -1549,27 +1747,37 @@ def _(mo):
     mo.md(r"""
     ## Write the panel
 
-    `panel_train` and `panel_test` go to separate files, so later work can read the training file without ever opening the test one. Written only when every check passes and the button is pressed.
+    `panel_train` and `panel_test` (universe rows only, with Model 1's target) go to separate files, so later work can read the training file without ever opening the test one. Written only when every check passes and the button is pressed.
     """)
     return
 
 
 @app.cell
-def _(SPLIT_DATE, TRADING_DAYS, mo, panel, panel_test, panel_train, pd):
-    _all = pd.concat([panel_train, panel_test])
+def _(
+    SPLIT_DATE,
+    TRADING_DAYS,
+    mo,
+    panel_test_out,
+    panel_train_out,
+    panel_x,
+    pd,
+):
+    _all = pd.concat([panel_train_out, panel_test_out])
     _checks = [
         ("one row per PERMNO and date", not _all.duplicated(["permno", "date"]).any()),
         ("every date is a trading day in the Robintrack period", bool(_all["date"].isin(TRADING_DAYS).all())),
         ("train ends before the split, test starts on it",
-         bool(panel_train["date"].max() < SPLIT_DATE <= panel_test["date"].min())),
-        ("train and test add up to the whole panel", len(panel_train) + len(panel_test) == len(panel)),
+         bool(panel_train_out["date"].max() < SPLIT_DATE <= panel_test_out["date"].min())),
+        ("train and test hold exactly the universe", len(panel_train_out) + len(panel_test_out) == int(panel_x["in_universe"].sum())),
+        ("every row has a price of $1+ and 100+ holders the day before", bool((_all["price_prev"].ge(1) & _all["holders_prev"].ge(100)).all())),
         ("holders are never negative", bool((_all["holders"] >= 0).all())),
         ("a change exists only where status is ok", bool((_all["change"].notna() == _all["status"].eq("ok")).all())),
+        ("y exists exactly on in_target rows", bool((_all["y"].notna() == _all["in_target"]).all())),
+        ("y has a daily mean of 0", bool(_all.groupby("date")["y"].mean().abs().max() < 1e-12)),
     ]
     panel_checks = pd.DataFrame(_checks, columns=["check", "passed"])
     write_panel = mo.ui.run_button(label="Write panel_train and panel_test")
     mo.vstack([mo.ui.table(panel_checks, selection=None), write_panel])
-
     return panel_checks, write_panel
 
 
@@ -1579,20 +1787,19 @@ def _(
     INTERMEDIATE_DIR,
     mo,
     panel_checks,
-    panel_test,
-    panel_train,
+    panel_test_out,
+    panel_train_out,
     write_panel,
 ):
     mo.stop(not panel_checks["passed"].all(), mo.md("**Not written:** a check failed."))
     mo.stop(not write_panel.value, mo.md("Press the button to write."))
     _dir = INTERMEDIATE_DIR / "clean"
     _dir.mkdir(parents=True, exist_ok=True)
-    for _name, _df in (("panel_train", panel_train), ("panel_test", panel_test)):
+    for _name, _df in (("panel_train", panel_train_out), ("panel_test", panel_test_out)):
         _part = _dir / f"{_name}.parquet.part"
         _df.to_parquet(_part, index=False)
         _part.rename(_dir / f"{_name}.parquet")
-    mo.md(f"Written to `{_dir.relative_to(DATA_DIR.parent)}`: {len(panel_train):,} train rows, {len(panel_test):,} test rows.")
-
+    mo.md(f"Written to `{_dir.relative_to(DATA_DIR.parent)}`: {len(panel_train_out):,} train rows, {len(panel_test_out):,} test rows.")
     return
 
 
