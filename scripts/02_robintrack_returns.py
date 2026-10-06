@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Robintrack and returns
 
-    Does the change in Robinhood holders, or features of it, predict next-day returns? Only the training return panel is read: `data/intermediate/clean/returns_train.parquet`, one row per stock and day in the universe known at 15:50 (a price of at least $1 and 100+ holders at the previous close), with return labels ending before the 2019-12-12 split. The test file stays closed until every choice made here is frozen.
+    Does the change in Robinhood holders, or features of it, predict next-day returns? Only the training return panel is read: `data/intermediate/clean/returns_train.parquet`, one row per stock and day in the universe known at 15:50 (a price of at least $1 and 100+ holders at the previous close), with return labels ending before the 2019-12-12 split. The test file stays closed until every choice made here is frozen; it is opened once, in the backtest at the end.
 
     Timing: the `*_prev` columns, `holders_close_prev` and the `rh_pct_*_lag1` features are known before the 15:50 cutoff on day t; `ret_next` is the close-to-close return from day t to the next trading day.
     """)
@@ -32,7 +32,7 @@ def _():
 def _(mo, pd):
     PANEL_TRAIN_PATH = mo.notebook_dir().parent / "data" / "intermediate" / "clean" / "returns_train.parquet"
     panel_raw = pd.read_parquet(PANEL_TRAIN_PATH)
-    return (panel_raw,)
+    return PANEL_TRAIN_PATH, panel_raw
 
 
 @app.cell(hide_code=True)
@@ -122,7 +122,7 @@ def _(mo, panel_raw, standardize):
               f"{panel['date'].nunique():,} days, {panel['date'].min():%Y-%m-%d} to {panel['date'].max():%Y-%m-%d}"),
         mo.ui.table(_types.assign(kept=_types["security_type"].isin(UNIVERSE_TYPES)), selection=None),
     ])
-    return (panel,)
+    return UNIVERSE_TYPES, panel
 
 
 @app.cell(hide_code=True)
@@ -140,9 +140,9 @@ def _(X, mo, panel, pd, sm):
     HAC_LAGS = 5  # Newey-West rule of thumb, 4 * (T / 100) ** (2 / 9), for about 400 days
 
 
-    def ols_hac(cols):
-        """Pooled OLS of ret_next_dm on cols, with Driscoll-Kraay HAC errors over days."""
-        d = panel[["date", "ret_next_dm", *cols]].dropna().sort_values("date")
+    def ols_hac(cols, data=None):
+        """Pooled OLS of ret_next_dm on cols, with Driscoll-Kraay HAC errors over days; on the training panel unless data is given."""
+        d = (panel if data is None else data)[["date", "ret_next_dm", *cols]].dropna().sort_values("date")
         return sm.OLS(d["ret_next_dm"], sm.add_constant(d[cols])).fit(
             cov_type="hac-groupsum", cov_kwds={"time": pd.factorize(d["date"], sort=True)[0], "maxlags": HAC_LAGS}
         )
@@ -200,9 +200,11 @@ def _(mo):
 
 @app.cell
 def _(HAC_LAGS, X, mo, np, panel, pd, sm):
-    def fama_macbeth(cols):
-        """Daily cross-sectional OLS of ret_next_dm on cols; returns the daily slopes and their averages with t-stats."""
-        d = panel[["date", "ret_next_dm", *cols]].dropna().sort_values("date")
+    def fama_macbeth(cols, data=None):
+        """Daily cross-sectional OLS of ret_next_dm on cols; returns the daily slopes and their averages with t-stats.
+
+        On the training panel unless data is given."""
+        d = (panel if data is None else data)[["date", "ret_next_dm", *cols]].dropna().sort_values("date")
         rows = []
         for day, g in d.groupby("date"):
             xmat = np.column_stack([np.ones(len(g)), g[cols].to_numpy()])
@@ -342,6 +344,195 @@ def _(
         mo.md("**Best CV R2 (bp) for each window pair** (rows: vol window, columns: sqdev window)"),
         mo.ui.table(_by_pair.reset_index(names="window"), selection=None),
         _fig,
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Backtest: ridge refitted daily, through the test period
+
+    **This is the one use of the test file.** Everything above (the three features, their windows, the universe, the winsorization) was fixed on train before it was opened; changing any of it after seeing these results would make the test period in-sample. The features come straight from Robintrack, which will not exist live, so this is the upper bound from the plan's check ("does the target predict returns at all?"), not a tradable Model 2.
+
+    - **Data:** the training and test return panels, the same universe, X and y standardized within each day as above.
+    - **Daily refit, expanding window:** trading starts on the first day with at least 120 training days (about six months). From then on, each day d, a ridge regression of `ret_next_dm` on level, vol and sqdev is fitted on every row whose label had ended by 15:50 on day d (the label of day t ends at the close of t+1, so the last training day is d-2), then predicts day d's stocks.
+    - **$\lambda$ each day by 5-fold cross-validation:** the training days are cut into 5 consecutive blocks; each is predicted by a fit on the other days, leaving out 5 days on each side; the $\lambda$ with the lowest total squared error wins ($\lambda = 0$ is plain OLS). The penalty is $\lambda n \lVert \beta \rVert^2$ on the slopes only, not the intercept.
+    - **Strategy:** each day, long the top fifth of predicted returns and short the bottom fifth, equal-weighted, dollar-neutral, traded close to close with market-on-close orders. Returns are gross: no costs, no borrow fees.
+    - **Reported separately:** the traded days inside train (pseudo out of sample: the features were chosen on them) and the test period (2019-12-12 to 2020-08-12, out of sample). The day 2019-12-11 is missing: its label ends on the first test day, so it is in neither file.
+    """)
+    return
+
+
+@app.cell
+def _(
+    HAC_LAGS,
+    PANEL_TRAIN_PATH,
+    UNIVERSE_TYPES,
+    X,
+    mo,
+    np,
+    panel,
+    pd,
+    standardize,
+):
+    BT_INPUTS = [X["level"], X["vol"], X["sqdev"]]
+    BT_MIN_TRAIN_DAYS = 120  # trading starts once the expanding window holds about six months of training days
+    BT_FOLDS, BT_GAP_DAYS = 5, HAC_LAGS
+    BT_LAMBDAS = np.r_[0.0, np.geomspace(1e-4, 1e2, 25)]
+    PANEL_TEST_PATH = PANEL_TRAIN_PATH.with_name("returns_test.parquet")
+
+    _test_raw = pd.read_parquet(PANEL_TEST_PATH)
+    TEST_START = _test_raw["date"].min()
+    bt_panel = pd.concat(
+        [panel, standardize(_test_raw[_test_raw["security_type"].isin(UNIVERSE_TYPES)])], ignore_index=True
+    )
+    _d = bt_panel[["date", "next_day", "permno", "ret_next", "ret_next_dm", *BT_INPUTS]].dropna().sort_values(["date", "permno"]).reset_index(drop=True)
+
+    # per-day sufficient statistics of [1, x] and y, so each fit is a 4 x 4 solve
+    _Z = np.column_stack([np.ones(len(_d)), _d[BT_INPUTS].to_numpy()])
+    _y = _d["ret_next_dm"].to_numpy()
+    _days, _first = np.unique(_d["date"].to_numpy(), return_index=True)
+    _next = _d["next_day"].to_numpy()[_first]
+    _cum = lambda a: np.concatenate([np.zeros((1, *a.shape[1:])), np.cumsum(a, axis=0)])
+    _ZZ = _cum(np.add.reduceat(_Z[:, :, None] * _Z[:, None, :], _first, axis=0))
+    _Zy = _cum(np.add.reduceat(_Z * _y[:, None], _first, axis=0))
+    _yy = _cum(np.add.reduceat(_y**2, _first))
+    _n = _cum(np.diff(np.r_[_first, len(_y)]).astype(float))
+    _P = np.diag([0.0, 1.0, 1.0, 1.0])  # no penalty on the intercept
+
+
+    def _stats(ranges):
+        """Sums of the statistics over day ranges [a, b)."""
+        return [sum(s[b] - s[a] for a, b in ranges if b > a) for s in (_ZZ, _Zy, _yy, _n)]
+
+
+    def _ridge(zz, zy, n, lam):
+        return np.linalg.solve(zz + lam * n * _P, zy)
+
+
+    _pred = np.full(len(_y), np.nan)
+    _log = []
+    for _j in range(len(_days)):
+        _m = int(np.searchsorted(_next, _days[_j], side="left"))  # days 0.._m-1 have labels ending before day j
+        if _m < BT_MIN_TRAIN_DAYS:
+            continue
+        _sse = np.zeros(len(BT_LAMBDAS))
+        for _block in np.array_split(np.arange(_m), BT_FOLDS):
+            _a, _b = _block[0], _block[-1] + 1
+            _zz, _zy, _, _nn = _stats([(0, max(_a - BT_GAP_DAYS, 0)), (min(_b + BT_GAP_DAYS, _m), _m)])
+            _vzz, _vzy, _vyy, _ = _stats([(_a, _b)])
+            for _k, _lam in enumerate(BT_LAMBDAS):
+                _beta = _ridge(_zz, _zy, _nn, _lam)
+                _sse[_k] += _vyy - 2 * _beta @ _vzy + _beta @ _vzz @ _beta
+        _lam = BT_LAMBDAS[_sse.argmin()]
+        _zz, _zy, _, _nn = _stats([(0, _m)])
+        _beta = _ridge(_zz, _zy, _nn, _lam)
+        _rows = slice(_first[_j], _first[_j + 1] if _j + 1 < len(_first) else len(_y))
+        _pred[_rows] = _Z[_rows] @ _beta
+        _log.append({"date": pd.Timestamp(_days[_j]), "train_days": _m, "lambda": _lam,
+                     **{f"beta_{_name}_bp": _v * 1e4 for _name, _v in zip(["const", "level", "vol", "sqdev"], _beta)}})
+
+    bt_fits = pd.DataFrame(_log).set_index("date")
+    bt_predictions = _d.assign(pred=_pred).dropna(subset=["pred"])[["date", "permno", "ret_next", "ret_next_dm", "pred"]]
+    mo.md(f"**{len(bt_fits):,} daily refits from {bt_fits.index.min():%Y-%m-%d} to {bt_fits.index.max():%Y-%m-%d}; "
+          f"{len(bt_predictions):,} predicted stock-days.** Chosen lambda: 0 (plain OLS) on {(bt_fits['lambda'] == 0).mean():.0%} of days, "
+          f"median {bt_fits['lambda'].median():.1e}.")
+    return BT_INPUTS, TEST_START, bt_fits, bt_panel, bt_predictions
+
+
+@app.cell
+def _(HAC_LAGS, TEST_START, bt_fits, bt_predictions, mo, np, pd, plt, sm):
+    # the daily long-short portfolio: top fifth of predictions long, bottom fifth short, equal-weighted
+    _p = bt_predictions.copy()
+    _p["quintile"] = _p.groupby("date")["pred"].transform(lambda s: pd.qcut(s.rank(method="first"), 5, labels=False))
+    _p["weight"] = 0.0
+    for _q, _sign in ((4, 1.0), (0, -1.0)):
+        _in = _p["quintile"] == _q
+        _p.loc[_in, "weight"] = _sign / _p[_in].groupby("date")["permno"].transform("size")
+    _daily = pd.DataFrame({
+        "long_short": _p.groupby("date").apply(lambda g: (g["weight"] * g["ret_next"]).sum()),
+        "market": _p.groupby("date")["ret_next"].mean(),  # the universe, equal-weighted
+        "ic": _p.groupby("date").apply(lambda g: g["pred"].corr(g["ret_next_dm"], method="spearman")),
+    })
+    # turnover: the sum of absolute weight changes from the previous day (gross exposure is 2)
+    _w = _p.pivot_table(index="date", columns="permno", values="weight", fill_value=0.0)
+    _daily["turnover"] = _w.diff().abs().sum(axis=1)
+    _daily.iloc[0, _daily.columns.get_loc("turnover")] = np.nan
+    bt_daily = _daily
+
+
+    def _nw_t(s):
+        s = s.dropna()
+        return sm.OLS(s.to_numpy(), np.ones(len(s))).fit(cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS}).tvalues[0]
+
+
+    def _metrics(g):
+        r = g["long_short"]
+        cum = r.cumsum()
+        capm = sm.OLS(r.to_numpy(), sm.add_constant(g["market"].to_numpy())).fit(cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS})
+        return pd.Series({
+            "days": len(r),
+            "mean_bp_per_day": r.mean() * 1e4,
+            "nw_t": _nw_t(r),
+            "annual_return_pct": r.mean() * 252 * 100,
+            "annual_vol_pct": r.std() * np.sqrt(252) * 100,
+            "sharpe": r.mean() / r.std() * np.sqrt(252),
+            "hit_rate": (r > 0).mean(),
+            "max_drawdown_pct": (cum - cum.cummax()).min() * 100,
+            "worst_day_pct": r.min() * 100,
+            "mean_daily_turnover": g["turnover"].mean(),
+            "breakeven_cost_bp": r.mean() / g["turnover"].mean() * 1e4,
+            "market_beta": capm.params[1],
+            "alpha_bp_per_day": capm.params[0] * 1e4,
+            "alpha_nw_t": capm.tvalues[0],
+            "mean_ic": g["ic"].mean(),
+            "ic_nw_t": _nw_t(g["ic"]),
+        })
+
+
+    _period = np.where(bt_daily.index < TEST_START, "inside train (pseudo out of sample)", "test (out of sample)")
+    bt_metrics = pd.concat([bt_daily.groupby(_period).apply(_metrics).T, _metrics(bt_daily).rename("all")], axis=1)
+
+    _fig, (_a1, _a2, _a3) = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    _a1.plot(bt_daily.index, bt_daily["long_short"].cumsum() * 100)
+    _a1.set(ylabel="cumulative %", title="Long-short, top minus bottom fifth (gross, not compounded)")
+    for _name in ("level", "vol", "sqdev"):
+        _a2.plot(bt_fits.index, bt_fits[f"beta_{_name}_bp"], label=_name)
+    _a2.set(ylabel="bp per sd", title="Daily refitted ridge betas")
+    _a2.legend()
+    _a3.plot(bt_fits.index, bt_fits["lambda"])
+    _a3.set_yscale("symlog", linthresh=1e-4)
+    _a3.set(ylabel="lambda", title="Lambda chosen by 5-fold CV")
+    for _ax in (_a1, _a2, _a3):
+        _ax.axvline(TEST_START, color="k", ls="--", lw=0.8)
+        _ax.axhline(0, color="grey", lw=0.5)
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md("**Strategy metrics** (gross; the dashed line in the plots is the start of the test period). `breakeven_cost_bp` is the cost per unit of turnover that would take the mean return to zero."),
+        mo.ui.table(bt_metrics.round(4).reset_index(names="metric"), selection=None, page_size=20),
+        _fig,
+    ])
+    return
+
+
+@app.cell
+def _(BT_INPUTS, TEST_START, bt_panel, fama_macbeth, mo, ols_hac, pd):
+    # significance of the betas on the test period only, with the methods above
+    _test = bt_panel[bt_panel["date"] >= TEST_START]
+    bt_test_ols = ols_hac(BT_INPUTS, data=_test)
+    bt_test_fm_slopes, bt_test_fm = fama_macbeth(BT_INPUTS, data=_test)
+    _names = ["level", "vol", "sqdev"]
+    bt_test_betas = pd.DataFrame({
+        "feature": _names,
+        "ols_beta_bp": [bt_test_ols.params[_c] * 1e4 for _c in BT_INPUTS],
+        "ols_hac_t": [bt_test_ols.tvalues[_c] for _c in BT_INPUTS],
+        "fm_mean_slope_bp": bt_test_fm.set_index("X").loc[BT_INPUTS, "mean_slope_bp"].to_numpy(),
+        "fm_nw_t": bt_test_fm.set_index("X").loc[BT_INPUTS, "nw_t"].to_numpy(),
+    })
+    mo.vstack([
+        mo.md(f"**Betas on the test period only** ({int(bt_test_ols.nobs):,} stock-days on {len(bt_test_fm_slopes):,} days; together, bp per standard deviation)"),
+        mo.ui.table(bt_test_betas.round(4), selection=None),
     ])
     return
 
