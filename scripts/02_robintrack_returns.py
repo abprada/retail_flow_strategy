@@ -38,15 +38,15 @@ def _(mo):
     mo.md(r"""
     ## Features
 
-    Five features of the daily % change in holders $g$, built in 01 from each stock's full daily history and ending at day t-1, so known by 15:50 on day t:
+    Three features of the daily % change in holders $g$, built in 01 from each stock's full daily history and ending at day t-1, so known by 15:50 on day t:
 
     | Feature | Column | Definition |
     |---|---|---|
     | level | `rh_pct_lag1` | $g_{t-1}$ |
-    | accel | `rh_pct_accel_lag1` | $g_{t-1} - g_{t-2}$ |
-    | sq | `rh_pct_sq_lag1` | $g_{t-1}^2$, a one-day variance |
     | vol | `rh_pct_vol_lag1` | standard deviation of $g$ over the last 20 trading days (at least 10 changes) |
-    | dev | `rh_pct_dev_lag1` | $g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes) |
+    | sqdev | `rh_pct_sqdev_lag1` | $(g_{t-1} - \bar g)^2$, with $\bar g$ the mean of $g$ over the 20 trading days before (at least 10 changes): the size of the last change as a surprise against the stock's own drift |
+
+    Four more, acceleration, the deviation from the 60-day mean, the 20-day mean and the plain squared change, were dropped; see the graveyard at the bottom.
     """)
     return
 
@@ -55,10 +55,8 @@ def _(mo):
 def _():
     FEATURES = {
         "level": "rh_pct_lag1",
-        "accel": "rh_pct_accel_lag1",
-        "sq": "rh_pct_sq_lag1",
         "vol": "rh_pct_vol_lag1",
-        "dev": "rh_pct_dev_lag1",
+        "sqdev": "rh_pct_sqdev_lag1",
     }
     X = {_name: f"{_col}_zw" for _name, _col in FEATURES.items()}  # the standardized column each regression uses
     return FEATURES, X
@@ -161,14 +159,14 @@ def _(mo):
     mo.md(r"""
     ## OLS, together
 
-    $r^{dm}_{t \to t+1} = \alpha + \beta_1\, \text{level}_{t-1} + \beta_2\, \text{sq}_{t-1} + \beta_3\, \text{vol}_{t-1} + \varepsilon$ on the rows where all three exist, with the same errors. Acceleration and the deviation from the 60-day mean are left out.
+    $r^{dm}_{t \to t+1} = \alpha + \beta_1\, \text{level}_{t-1} + \beta_2\, \text{sqdev}_{t-1} + \beta_3\, \text{vol}_{t-1} + \varepsilon$ on the rows where all three exist, with the same errors.
     """)
     return
 
 
 @app.cell
 def _(X, mo, ols_hac, pd):
-    JOINT = ["level", "sq", "vol"]
+    JOINT = ["level", "sqdev", "vol"]
 
     ols_joint = ols_hac([X[_name] for _name in JOINT])
     mo.vstack([
@@ -230,7 +228,7 @@ def _(mo):
     mo.md(r"""
     ## Fama-MacBeth, together
 
-    Each training day, a cross-sectional OLS of `ret_next_dm` on level, squared change and volatility together (the same three as the pooled OLS); the slopes are averaged over days as above. Each average slope is the daily return of a long-short portfolio with unit exposure to that feature and zero to the other two.
+    Each training day, a cross-sectional OLS of `ret_next_dm` on level, squared deviation and volatility together (the same three as the pooled OLS); the slopes are averaged over days as above. Each average slope is the daily return of a long-short portfolio with unit exposure to that feature and zero to the other two.
     """)
     return
 
@@ -243,6 +241,23 @@ def _(JOINT, X, fama_macbeth, mo):
               f"average cross-sectional R2 {fm_joint_slopes['r_squared'].mean():.2%}**"),
         mo.ui.table(fm_joint_results.assign(feature=["const", *JOINT]).round(4), selection=None),
     ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Graveyard
+
+    Features tried and dropped, with their train results at the time, in the same universe and units as above (bp per standard deviation).
+
+    - **accel**, `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$: OLS alone $-0.69$ (HAC t $-1.07$); Fama-MacBeth alone $-0.89$ (Newey-West t $-1.35$). Correlation 0.58 with the level. It only looked useful next to the level, in a lasso on all five features (kept in 82% of bootstrap draws, +0.58, post-lasso t 1.36): the positive sign just says the change two days ago also predicts negatively. Dropped.
+    - **dev**, `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before: OLS alone $-0.74$ (HAC t $-1.19$); Fama-MacBeth alone $-0.82$ (Newey-West t $-1.34$). Correlation 0.82 with the level, so it is mostly the level again; the lasso set it to 0. Dropped.
+    - **mean**, `rh_pct_mean_lag1`, the mean of $g$ over the 20 trading days ending at t-1 (same window as the volatility): OLS alone $-2.51$ (HAC t $-3.47$); Fama-MacBeth alone $-2.48$ (Newey-West t $-3.42$). But its correlation with the volatility is 0.86 after winsorizing and z-scoring: the holder change is right-skewed, so big inflows raise the mean and the spread together. Next to level, sq and vol it turns positive, $+1.52$ (HAC t $1.27$) in pooled OLS and $+1.43$ (Newey-West t $1.13$) in Fama-MacBeth, while the volatility gets stronger. It adds nothing beyond the volatility. Dropped.
+    - **sq**, `rh_pct_sq_lag1` $= g_{t-1}^2$: OLS alone $-3.84$ (HAC t $-4.32$); Fama-MacBeth alone $-3.78$ (Newey-West t $-4.35$). With level and vol: $-1.42$ (HAC t $-1.51$) in pooled OLS, $-1.66$ (Newey-West t $-1.69$) in Fama-MacBeth. Replaced by sqdev, the squared deviation from the 20-day mean: correlation 0.75, and head to head on the same rows sq falls to $-1.12$ (HAC t $-0.93$) while sqdev keeps $-2.57$ (HAC t $-3.04$). The size of a change measured against the stock's own drift is the cleaner surprise. Dropped.
+
+    All four are still built in `01_clean_explore_robintrack.py` and written to the return panel.
+    """)
     return
 
 

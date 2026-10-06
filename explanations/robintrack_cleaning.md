@@ -98,9 +98,10 @@ Units and floor were compared on train: taking logs cuts kurtosis from 389,105 t
 **Return panel (`returns_*.parquet`), for predicting next-day returns.**
 
 - **Rows:** every stock-day in the **15:50 universe**: a price of at least $1 and at least 100 holders at day t-1's close. Nothing from day t is used to choose the rows; a stock stays even if day t's reading is missing.
-- **X:** day t-1's change in holders as a % change, a log change and a change in log(1 + holders). Each is winsorized at that day's 1st and 99th percentiles within the universe, then z-scored that day (`_zw`). Z-scoring after winsorizing keeps the scale robust; z-scoring with the raw standard deviation lets one extreme stock shrink everyone else.
-- **y:** `ret_next_dm`, the next-day return minus the universe's mean that day.
-- **Upper bound only:** day t's own change (`rh_pct_t*`), known only after the close.
+- **X:** day t-1's % change in holders (`rh_pct_lag1`) and features of its history up to day t-1: acceleration, square, 20-day volatility, 20-day mean, squared deviation from the 20-day mean, and deviation from the 60-day mean. Raw values only: winsorizing and z-scores depend on the universe, so `02_robintrack_returns.py` does them each day within the universe it picks.
+- **y:** `ret_next`, the next-day return; 02 demeans it within its universe each day.
+- **Classification:** `is_common` and `security_type` (common stock, foreign common stock, ADR, REIT, ETF, closed-end fund, unit or other), from CRSP's name record on day t.
+- **Upper bound only:** day t's own change (`rh_pct_t`), known only after the close.
 
 ## 10. Checks before writing
 

@@ -1,50 +1,64 @@
 # Robintrack and returns
 
-What `scripts/02_robintrack_returns.py` does: does the change in Robinhood holders predict next-day relative returns? It only estimates. Every variable is built in `01_clean_explore_robintrack.py`, and only `returns_train.parquet` is read: training labels from 2018-05-02 that end before the 2019-12-12 split. **All results are in sample.**
-
-## Setup
-
-- **Rows:** the 15:50 universe, meaning a price of at least $1 and at least 100 holders at day t-1's close. About 1.38 million stock-days over 404 days.
-- **y:** `ret_next_dm`, the return from day t's close to the next close, minus the universe mean that day.
-- **X:** features of g, the daily % change in holders, all ending at day t-1, so known by 15:50 on day t. Each is used as `_zw`: winsorized at the day's 1st and 99th percentiles, then z-scored within the universe that day. β is in basis points per standard deviation.
-- **Standard errors:** Driscoll-Kraay HAC with 5 lags, robust to correlation across stocks on a day and over days.
+What `scripts/02_robintrack_returns.py` does: does the change in Robinhood holders predict next-day relative returns? Every feature is built in `01_clean_explore_robintrack.py`; 02 picks the universe, standardizes within it and estimates. Only `returns_train.parquet` is read: training labels from 2018-05-04 that end before the 2019-12-12 split. **All results are in sample.**
 
 ## Features
+
+g is the daily % change in holders, close to close. Every feature ends at day t-1, so it is known by 15:50 on day t.
 
 | Feature | Definition |
 |---|---|
 | level | g(t-1) |
-| acceleration | g(t-1) - g(t-2) |
-| squared change | g(t-1)² |
-| volatility | standard deviation of g over 20 trading days |
-| deviation | g(t-1) minus its mean over the previous 60 days |
+| vol | standard deviation of g over the last 20 trading days |
+| sqdev | (g(t-1) - mean of g over the 20 trading days before)², the last change as a surprise against the stock's own drift |
 
-**Correlations:** deviation and level 0.82, level and acceleration 0.59, squared change and volatility 0.37. The squared change has a rank correlation of 0.01 with the level, because it measures size, not direction.
+Correlations after standardizing: sqdev with vol 0.66, sqdev with level 0.26, level with vol 0.01.
+
+## Winsorization and standardization
+
+Each day, within that day's universe:
+
+- **X:** winsorized at the 1st and 99th percentiles, then z-scored (`_zw`). β is in basis points per standard deviation.
+- **y:** `ret_next_dm`, the next-day return minus the universe mean that day.
+
+## Universe
+
+The 15:50 universe from 01 (price of at least $1 and at least 100 holders at day t-1's close), kept to operating companies by CRSP's classification on day t: US common stock, foreign common stock and ADRs. ETFs, closed-end funds, REITs and units are dropped, about 27% of rows. That leaves 1,029,963 stock-days on 3,454 PERMNOs over 392 days.
 
 ## Results
 
-| X | alone: β (HAC t) | three together: β (HAC t) | lasso β | kept in bootstrap | post-lasso HAC t |
-|---|---|---|---|---|---|
-| level | -2.17 (-3.92) | -1.02 (-1.83) | -1.50 | 98% | -2.50 |
-| acceleration | -0.24 (-0.46) | | +0.91 | 96% | 2.06 |
-| squared change | -3.35 (-4.69) | -1.52 (-1.98) | -1.20 | 94% | -1.44 |
-| volatility | -2.68 (-4.10) | -2.22 (-3.42) | -1.86 | 100% | -3.21 |
-| deviation | -0.36 (-0.65) | | 0 | 48% | |
+- **OLS:** pooled, with Driscoll-Kraay HAC errors (5 lags).
+- **Fama-MacBeth:** a cross-sectional OLS each day, averaged over days, with Newey-West t-stats (5 lags).
 
-- **Three together:** joint Wald χ²(3) = 28.3, p = 3e-6.
-- **Lasso:** λ is chosen by forward-chaining cross-validation over 5 blocks of days, with a 1-day gap. The cross-validated out-of-sample R² is 0.79 bp. Significance comes from post-lasso OLS and a bootstrap of 5-day blocks with 200 draws. Only volatility has a bootstrap 95% interval clear of 0 with room to spare: [-2.96, -0.69].
+| X | OLS alone: β (t) | Fama-MacBeth alone: β (t) | OLS together: β (t) | Fama-MacBeth together: β (t) |
+|---|---|---|---|---|
+| level | -2.88 (-4.21) | -2.84 (-4.15) | -1.76 (-2.76) | -1.82 (-2.93) |
+| vol | -3.00 (-4.10) | -3.01 (-4.14) | -1.89 (-1.84) | -1.61 (-1.52) |
+| sqdev | -3.39 (-5.24) | -3.35 (-5.12) | -1.70 (-1.89) | -1.88 (-2.13) |
+
+"Together" runs on the 977,735 rows where all three exist, 372 days with a median of 2,654 stocks. The average daily cross-sectional R² is 0.40%.
 
 ## Reading
 
-Stocks with persistent Robinhood activity underperform the next day.
+Stocks whose Robinhood flow has been large, erratic or surprising underperform the next day.
 
-- The 20-day volatility is the only robust feature.
-- A single day's move, or its size, adds little once volatility is in.
-- The positive acceleration only means the change two days ago also predicts negatively.
-- The deviation from a stock's own mean carries nothing.
+- **Alone,** each feature predicts about -3 bp per standard deviation, with t-stats of 4 to 5.
+- **Together,** the level stays significant. Vol and sqdev share one effect: the size of recent flow relative to the stock's normal flow. Each takes part of it, and neither is clearly significant on its own.
+- **The effect is the sum, not any one coefficient:** about -5 bp a day for a one-standard-deviation move in all three.
+
+## Graveyard
+
+Tried and dropped (numbers in the notebook):
+
+- **Acceleration and the deviation from the 60-day mean:** not significant alone.
+- **The 20-day mean:** significant alone, but its correlation with vol is 0.86, and next to vol its sign turns.
+- **The squared change g(t-1)²:** replaced by sqdev, which beats it head to head on the same rows (sq t -0.93, sqdev t -3.04).
 
 ## Caveats and next steps
 
-- In sample, and the features were chosen after seeing results, so the t-stats overstate.
-- No controls yet for the previous day's return or the stock's own return volatility.
-- Next: add those controls, then a portfolio sort with the sign fixed and an expanding-window test inside train. The test period is used once, at the end.
+- **In sample, and heavily searched:** seven features were tried on the same training data and the three kept were chosen after seeing results. Sqdev was the last one tried, so its t of -5.2 is the most data-mined number here. The t-stats overstate.
+- **No controls yet** for the previous day's return, the stock's own return volatility, or size. Vol and sqdev may partly stand in for stocks with few holders, whose % changes are noisy by construction.
+- **Next:**
+  - add those controls;
+  - run a portfolio sort with the sign fixed and an expanding-window test inside train;
+  - use the test period once, at the end.
