@@ -55,6 +55,6 @@ Check `qu_cond` before trusting a spread at the open or the close.
 
 - No zero bids or asks.
 - 163 rows with one side missing (84 without a bid, 151 without an offer): no one was quoting that side.
-- 22 crossed rows (bid above ask), dropped in cleaning.
+- 22 crossed rows (bid above ask).
 - Median quoted spread 3.4 bp.
 - Sizes are in shares, almost always multiples of 100 (round lots).

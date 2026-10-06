@@ -4,20 +4,20 @@ NYSE's Daily TAQ (Trade and Quote) is every trade and quote printed on the US co
 
 - **Layout:** one table per day and file type, named `<type>_YYYYMMDD`, e.g. `ctm_20190604`.
 - **Download:** `scripts/00_fetch_TAQ.py` saves files unchanged in `data/raw/taq/<date>/`. So far that is one test minute: 15:49:00 to 15:49:59 New York time on 2019-06-04.
-- **Exploration and cleaning:** `scripts/01_explore_and_clean_TAQ.py`.
+- **First look:** `scripts/01_explore_and_clean_TAQ.py` shows the head of each raw file.
 - **Definitions:** the column meanings and codes below come from NYSE's *Daily TAQ Client Specification* (v3.3). The counts come from the test minute.
 
 ## Tables for one day
 
 | Table | Content | Downloaded | Explained in |
 |---|---|---|---|
-| `ctm` | every trade on the consolidated tape | yes | [trades.md](trades.md) |
-| `complete_nbbo` | every change in the national best bid and offer (NBBO) | yes | [nbbo.md](nbbo.md) |
+| `wct` | WRDS Consolidated Trades: every trade with the NBBO standing just before it. **The table we use**; it replaces `ctm` and `complete_nbbo` | yes | [wct.md](wct.md) |
+| `ctm` | every trade on the consolidated tape | checked, then deleted | [trades.md](trades.md) |
+| `complete_nbbo` | every change in the national best bid and offer (NBBO) | checked, then deleted | [nbbo.md](nbbo.md) |
 | `mastm` | the master file: one row per symbol, with CUSIP, security type and listing venue | yes | [master.md](master.md) |
 | `cqm` | every quote from every venue, NBBO or not; by far the largest table | no | |
 | `nbbom` | NYSE's NBBO file: quotes that change the NBBO, *excluding* those that are themselves both best bid and best offer. `complete_nbbo` is WRDS's merge of `nbbom` with those quotes from `cqm` | no | |
 | `luld_ctm`, `luld_cqm` | Limit Up-Limit Down price bands and trading pauses | no | |
-| `wct` | a table WRDS builds itself, not part of NYSE's spec; columns not yet checked | no | |
 
 ## Size of one minute (15:49, 2019-06-04)
 
