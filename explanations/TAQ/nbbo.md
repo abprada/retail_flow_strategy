@@ -1,5 +1,7 @@
 # NBBO (`taqmsec.complete_nbbo_YYYYMMDD`)
 
+**Replaced by WCT.** We no longer download `complete_nbbo`: [WRDS Consolidated Trades](wct.md) attaches the NBBO standing before each trade, checked against this table. This file stays as the reference for the quote codes.
+
 The national best bid and offer (NBBO): the highest bid and the lowest offer across all exchanges for a stock. One row each time it changes.
 
 The table is WRDS's merge of two NYSE files, following Appendix I of the TAQ spec:

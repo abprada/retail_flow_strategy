@@ -1,5 +1,7 @@
 # Trades (`taqmsec.ctm_YYYYMMDD`)
 
+**Replaced by WCT.** We no longer download `ctm`: [WRDS Consolidated Trades](wct.md) holds the same trades with the same columns for venue, sale conditions, price and size, so this file stays as the reference for those codes.
+
 Every trade reported to the consolidated tape by every venue: the exchanges, and FINRA's trade reporting facilities (TRFs) for off-exchange trades. One row per trade report, sorted by symbol, time and sequence number.
 
 The test minute (15:49, 2019-06-04) has 242,992 trades in 4,871 symbols.
@@ -142,6 +144,6 @@ Prints with `4`, `B`, `W`, `C`, `N`, `R`, `T`, `U`, `L` or `Z` are not normal-wa
 | 11 | error record (follows a `07`) |
 | 12 | correction record (follows an `01`; carries the original, incorrect data) |
 
-In the test minute every trade is `00`.
+In the test minute every trade is `00`. Over the full day: 509 trades later cancelled (`08`), 509 cancel records (`10`), 7 corrected trades (`01`) and 7 correction records (`12`), out of 42,561,043. WCT has no `tr_corr`, so these stay in it (see [wct.md](wct.md)).
 
 The flag is written at the end of the day, so a trade cancelled at 15:55 already shows `08` at 15:49. Keeping only `00` therefore uses a little information from after the trade. At these frequencies that is negligible, but it is the one place the file is not point in time.
