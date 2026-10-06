@@ -1823,7 +1823,7 @@ def _(mo):
 
     - **Rows:** every stock and trading day t in the **15:50 universe**: a CRSP price of at least $1 and at least 100 Robinhood holders at day t-1's close. A stock stays in even if day t's close reading is missing or a break follows.
     - **X, known by 15:50 on day t:** `rh_pct_lag1`, the % change in holders on day t-1 (from T2; missing if day t-1 had no usable change).
-    - **Features of the holder-change history, known by 15:50 on day t** (built on each PERMNO's whole daily history, all ending at day t-1's change $g_{t-1}$): `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$; `rh_pct_sq_lag1` $= g_{t-1}^2$; `rh_pct_vol_lag1`, the standard deviation of $g$ over the last 20 trading days (at least 10 changes); `rh_pct_mean_lag1`, the mean of $g$ over the same 20 days; `rh_pct_sqdev_lag1` $= (g_{t-1} - \bar g)^2$, with $\bar g$ the mean over the 20 trading days before (at least 10 changes); `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes).
+    - **Features of the holder-change history, known by 15:50 on day t** (built on each PERMNO's whole daily history, all ending at day t-1's change $g_{t-1}$): `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$; `rh_pct_sq_lag1` $= g_{t-1}^2$; `rh_pct_vol_lag1`, the standard deviation of $g$ over the last 20 trading days (at least 10 changes); `rh_pct_mean_lag1`, the mean of $g$ over the same 20 days; `rh_pct_sqdev_lag1` $= (g_{t-1} - \bar g)^2$, with $\bar g$ the mean over the 20 trading days before (at least 10 changes); `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes). The volatility and the squared deviation are also built over a grid of windows, `rh_pct_vol{n}_lag1` and `rh_pct_sqdev{n}_lag1` for n of 5, 10, 20, 40 and 60 trading days (at least n/2 changes), so 02 can choose the window on train.
     - **Upper bound only, known after day t's close:** `rh_pct_t`, day t's own change, missing when day t has no usable change.
     - **y:** `ret_next`, CRSP's total return from day t's close to the next trading day's close. Kept when CRSP's return covers one trading day (D1 to D4, DU) or is a delisting payoff (DD). A delisting payoff can span more than a day, so those rows carry `ret_next_is_delisting`.
     - **Also:** `ret_prev`, `price_prev`, `cap_prev`, `dollar_volume_prev` (day t-1), and `is_common` and `security_type` (day t): CRSP's classification into common stock, foreign common stock, ADR, REIT, ETF, closed-end fund, unit or other.
@@ -1855,6 +1855,11 @@ def _(TRADING_DAYS, pd, t2_change, t2_pct):
         # deviation from the stock's own mean change over the previous 60 days, excluding the day itself
         "rh_pct_dev_lag1": _wide - _wide.rolling(HOLDER_MEAN_WINDOW, min_periods=HOLDER_MEAN_WINDOW // 2).mean().shift(1),
     }
+    # vol and sqdev over a grid of rolling windows, for 02 to choose among on train; each needs at least half its window
+    HOLDER_WINDOW_GRID = [5, 10, 20, 40, 60]
+    for _n in HOLDER_WINDOW_GRID:
+        _features[f"rh_pct_vol{_n}_lag1"] = _wide.rolling(_n, min_periods=_n // 2).std()
+        _features[f"rh_pct_sqdev{_n}_lag1"] = (_wide - _wide.rolling(_n, min_periods=_n // 2).mean().shift(1)) ** 2
     holder_change_features = (
         pd.concat({_k: _v.stack() for _k, _v in _features.items()}, axis=1)
         .dropna(how="all")

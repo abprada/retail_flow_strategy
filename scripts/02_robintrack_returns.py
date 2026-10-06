@@ -19,11 +19,13 @@ def _(mo):
 @app.cell
 def _():
     import marimo as mo
+    import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
     import statsmodels.api as sm
+    from sklearn.linear_model import Lasso, lasso_path
 
-    return mo, np, pd, sm
+    return Lasso, lasso_path, mo, np, pd, plt, sm
 
 
 @app.cell
@@ -43,8 +45,10 @@ def _(mo):
     | Feature | Column | Definition |
     |---|---|---|
     | level | `rh_pct_lag1` | $g_{t-1}$ |
-    | vol | `rh_pct_vol_lag1` | standard deviation of $g$ over the last 20 trading days (at least 10 changes) |
-    | sqdev | `rh_pct_sqdev_lag1` | $(g_{t-1} - \bar g)^2$, with $\bar g$ the mean of $g$ over the 20 trading days before (at least 10 changes): the size of the last change as a surprise against the stock's own drift |
+    | vol | `rh_pct_vol60_lag1` | standard deviation of $g$ over the last 60 trading days (at least 30 changes) |
+    | sqdev | `rh_pct_sqdev20_lag1` | $(g_{t-1} - \bar g)^2$, with $\bar g$ the mean of $g$ over the 20 trading days before (at least 10 changes): the size of the last change as a surprise against the stock's own drift |
+
+    Vol and sqdev are also built over rolling windows of 5, 10, 20, 40 and 60 trading days (at least half the window); the windows above, 60 days for vol and 20 for sqdev, are the ones the 10-fold cross-validation in the lasso section chose on train. The choice is weak: every window pair scored within one standard error of the best.
 
     Four more, acceleration, the deviation from the 60-day mean, the 20-day mean and the plain squared change, were dropped; see the graveyard at the bottom.
     """)
@@ -55,11 +59,14 @@ def _(mo):
 def _():
     FEATURES = {
         "level": "rh_pct_lag1",
-        "vol": "rh_pct_vol_lag1",
-        "sqdev": "rh_pct_sqdev_lag1",
+        "vol": "rh_pct_vol60_lag1",  # windows chosen by the 10-fold cross-validation in the lasso section
+        "sqdev": "rh_pct_sqdev20_lag1",
     }
     X = {_name: f"{_col}_zw" for _name, _col in FEATURES.items()}  # the standardized column each regression uses
-    return FEATURES, X
+    # candidate rolling windows for vol and sqdev (built in 01), chosen by cross-validation in the lasso section
+    WINDOW_GRID = [5, 10, 20, 40, 60]
+    WINDOW_COLUMNS = [f"rh_pct_{_k}{_n}_lag1" for _k in ("vol", "sqdev") for _n in WINDOW_GRID]
+    return FEATURES, WINDOW_COLUMNS, WINDOW_GRID, X
 
 
 @app.cell(hide_code=True)
@@ -76,7 +83,7 @@ def _(mo):
 
 
 @app.cell
-def _(FEATURES):
+def _(FEATURES, WINDOW_COLUMNS):
     WINSOR_QUANTILES = (0.01, 0.99)
 
 
@@ -84,7 +91,7 @@ def _(FEATURES):
         """Winsorize and z-score each feature, and demean the next-day return, within each day of df."""
         df = df.copy()
         day = df["date"]
-        for col in FEATURES.values():
+        for col in [*FEATURES.values(), *WINDOW_COLUMNS]:
             q = df[col].groupby(day).quantile(list(WINSOR_QUANTILES)).unstack()
             w = df[col].clip(day.map(q[WINSOR_QUANTILES[0]]), day.map(q[WINSOR_QUANTILES[1]]))
             df[f"{col}_zw"] = (w - w.groupby(day).transform("mean")) / w.groupby(day).transform("std")
@@ -240,6 +247,101 @@ def _(JOINT, X, fama_macbeth, mo):
         mo.md(f"**{len(fm_joint_slopes):,} days, {int(fm_joint_slopes['n'].median()):,} stocks on the median day, "
               f"average cross-sectional R2 {fm_joint_slopes['r_squared'].mean():.2%}**"),
         mo.ui.table(fm_joint_results.assign(feature=["const", *JOINT]).round(4), selection=None),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Lasso, with 10-fold cross-validation
+
+    $\min_{\alpha, \beta}\ \frac{1}{2n}\sum (r^{dm}_{t \to t+1} - \alpha - X_{t-1}\beta)^2 + \lambda \lVert \beta \rVert_1$ on level, vol and sqdev. Three hyperparameters are chosen together by cross-validation on train: $\lambda$, the rolling window of vol and the rolling window of sqdev (each 5, 10, 20, 40 or 60 trading days).
+
+    - **Folds:** the training days are cut into 10 consecutive blocks. Each block is predicted by a fit on all other days, leaving out 5 days on each side of the block (the HAC lag length), so neighbouring days' correlated returns do not leak into the fit. Folds are by day, never by row, because stocks on the same day share their shocks.
+    - **Same rows for every candidate:** rows where all window choices exist, so the 25 window pairs are compared on one sample.
+    - **Score:** the out-of-sample $R^2$ in each validation block against predicting the training mean, averaged over the 10 folds. The chosen triple has the highest average; the final lasso refits it on all those rows, so its betas are still in sample.
+    """)
+    return
+
+
+@app.cell
+def _(
+    HAC_LAGS,
+    Lasso,
+    WINDOW_COLUMNS,
+    WINDOW_GRID,
+    lasso_path,
+    mo,
+    np,
+    panel,
+    pd,
+    plt,
+):
+    CV_FOLDS, CV_GAP_DAYS = 10, HAC_LAGS
+
+    # rows where every candidate window exists
+    _cols = ["rh_pct_lag1_zw", *[f"{_c}_zw" for _c in WINDOW_COLUMNS]]
+    _d = panel[["date", "ret_next_dm", *_cols]].dropna().sort_values("date").reset_index(drop=True)
+    _y = _d["ret_next_dm"].to_numpy()
+    _days = np.sort(_d["date"].unique())
+    _day_no = np.searchsorted(_days, _d["date"].to_numpy())
+
+    # 10 consecutive blocks of days; the training rows leave out CV_GAP_DAYS on each side of the block
+    _folds = []
+    for _block in np.array_split(np.arange(len(_days)), CV_FOLDS):
+        _va = np.isin(_day_no, _block)
+        _tr = (_day_no < _block[0] - CV_GAP_DAYS) | (_day_no > _block[-1] + CV_GAP_DAYS)
+        _folds.append((_tr, _va))
+
+    # one lambda grid for every window pair: from the largest lambda that keeps any feature down to 1/1000 of it
+    _Xall = _d[_cols].to_numpy()
+    _lambda_max = np.abs((_Xall - _Xall.mean(0)).T @ (_y - _y.mean())).max() / len(_y)
+    LASSO_LAMBDAS = np.geomspace(_lambda_max, _lambda_max * 1e-3, 40)
+
+    _rows = []
+    for _nv in WINDOW_GRID:
+        for _ns in WINDOW_GRID:
+            _X = _d[["rh_pct_lag1_zw", f"rh_pct_vol{_nv}_lag1_zw", f"rh_pct_sqdev{_ns}_lag1_zw"]].to_numpy()
+            _r2 = []
+            for _tr, _va in _folds:
+                _xm, _ym = _X[_tr].mean(0), _y[_tr].mean()
+                _, _coefs, _ = lasso_path(_X[_tr] - _xm, _y[_tr] - _ym, alphas=LASSO_LAMBDAS)
+                _pred = _ym + (_X[_va] - _xm) @ _coefs  # one column per lambda
+                _r2.append(1 - ((_y[_va, None] - _pred) ** 2).sum(0) / ((_y[_va] - _ym) ** 2).sum())
+            _r2 = np.array(_r2)
+            for _i, _lam in enumerate(LASSO_LAMBDAS):
+                _rows.append({"n_vol": _nv, "n_sqdev": _ns, "lambda": _lam, "cv_r2_bp": _r2[:, _i].mean() * 1e4,
+                              "cv_r2_se_bp": _r2[:, _i].std(ddof=1) / np.sqrt(CV_FOLDS) * 1e4})
+    lasso_cv = pd.DataFrame(_rows)
+    lasso_best = lasso_cv.loc[lasso_cv["cv_r2_bp"].idxmax()]
+
+    # refit the chosen triple on all the rows
+    LASSO_COLUMNS = ["rh_pct_lag1_zw", f"rh_pct_vol{int(lasso_best['n_vol'])}_lag1_zw", f"rh_pct_sqdev{int(lasso_best['n_sqdev'])}_lag1_zw"]
+    lasso_fit = Lasso(alpha=lasso_best["lambda"]).fit(_d[LASSO_COLUMNS].to_numpy(), _y)
+    lasso_coefs = pd.DataFrame({"feature": ["level", "vol", "sqdev"], "X": LASSO_COLUMNS, "beta_bp_per_sd": lasso_fit.coef_ * 1e4})
+
+    # best CV R2 over lambda for each window pair, and the lambda curve of the chosen pair
+    _by_pair = lasso_cv.groupby(["n_vol", "n_sqdev"])["cv_r2_bp"].max().unstack().round(3)
+    _by_pair.columns = [f"sqdev {_n} days" for _n in _by_pair.columns]
+    _by_pair.index = [f"vol {_n} days" for _n in _by_pair.index]
+    _curve = lasso_cv[(lasso_cv["n_vol"] == lasso_best["n_vol"]) & (lasso_cv["n_sqdev"] == lasso_best["n_sqdev"])]
+    _fig, _ax = plt.subplots(figsize=(7, 3.5))
+    _ax.errorbar(_curve["lambda"], _curve["cv_r2_bp"], yerr=_curve["cv_r2_se_bp"], fmt="o-", ms=3)
+    _ax.axhline(0, color="grey", lw=0.8)
+    _ax.axvline(lasso_best["lambda"], color="k", ls="--", lw=0.8)
+    _ax.set(xscale="log", xlabel="lambda", ylabel="CV out-of-sample R2 (bp)",
+            title=f"vol {int(lasso_best['n_vol'])} days, sqdev {int(lasso_best['n_sqdev'])} days: 10-fold CV")
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md(f"**{len(_d):,} stock-days on {len(_days):,} days.** Chosen: vol over {int(lasso_best['n_vol'])} days, sqdev over "
+              f"{int(lasso_best['n_sqdev'])} days, lambda {lasso_best['lambda']:.2e}; CV out-of-sample R2 {lasso_best['cv_r2_bp']:.2f} bp "
+              f"(standard error {lasso_best['cv_r2_se_bp']:.2f} bp across folds)."),
+        mo.md("**Lasso betas on all rows** (bp per standard deviation)"),
+        mo.ui.table(lasso_coefs.round(4), selection=None),
+        mo.md("**Best CV R2 (bp) for each window pair** (rows: vol window, columns: sqdev window)"),
+        mo.ui.table(_by_pair.reset_index(names="window"), selection=None),
+        _fig,
     ])
     return
 
