@@ -32,7 +32,7 @@ Result: 8,042 PERMNOs, with no overlapping segments and no duplicate PERMNO-time
 | C1 | zeros before a PERMNO's first holder: placeholders for instruments not yet trading | drop | 731,813 |
 | C2 | a switch to another file is a switch to another Robinhood instrument, which often restarts at 0 and climbs (UTX to RTX) | drop the restart zeros; mark a **break**, and never take a change across it | 277 (83 breaks) |
 | C3 | readings less than 5 minutes apart come from overlapping or restarted sweeps (a full sweep takes at least 7 minutes) | keep the last reading of each cluster | 571,048 |
-| C4 | sweep-wide outages (no reading for over 1.5 hours) | listed, not dropped; a day without a close gets no change | 97 outages |
+| C4 | sweep-wide outages (no reading for over 1.5 hours) | listed, not dropped; a day without a count gets no change | 97 outages |
 | C5 | a count falling to 0 from 10 or more holders: a recording failure (instrument replaced at a reverse split or merger, or a Robintrack fault), not real selling | treat as missing, plus a break | 29 runs, 74,750 rows |
 
 C5 keeps drops from 1 to 9 holders, which look real; any cut-off from 5 to 13 flags the same runs. Of the 29 runs, 23 fall within a week of a CRSP corporate event; the other 6 cluster on shared dates.
@@ -41,7 +41,8 @@ C5 keeps drops from 1 to 9 holders, which look real; any cut-off from 5 to 13 fl
 
 - **Timestamps are UTC.** The daily pattern shifts by an hour between daylight-saving seasons in raw time but lines up in New York time.
 - **Counts lag the reading by about 25 to 40 minutes.** Readings taken up to 9:55 do not yet show the 9:30 open, and readings at 19:40 no longer show after-hours trading, which ended at 18:00.
-- **The day's close count is the reading taken 16:40 to 16:59 ET.** That reading shows holdings at about 16:00 to 16:35, the full session. The 15:4x reading would miss the last 30 to 60 minutes. Sweeps run at :40 to :59, so any lag in that range picks the same reading.
+- **The day's count is the first reading retrieved 15:40 to 15:50 ET,** the last one known before the 15:50 market-on-close cutoff. With the lag, it shows holdings at about 15:00 to 15:25 ET. Readings retrieved at 15:50 or later are after the cutoff and are never used, and there is no fallback to an earlier sweep.
+- **Daily changes run from the previous trading day's count to today's.** Both ends are known before the cutoff and are taken at the same time of day.
 
 ## 5. Corporate events (recorded, not applied)
 
@@ -49,17 +50,17 @@ C5 keeps drops from 1 to 9 holders, which look real; any cut-off from 5 to 13 fl
 
 Event rows are kept; nothing is excluded around them. On train:
 
-- **Forward splits:** holders rise about 6% on the day and keep climbing. Retail buying the cheaper shares.
-- **Reverse splits:** a lasting drop of about 30%, consistent with holders of fewer shares than the ratio being cashed out. Kept anyway.
-- **Spin-off parents:** the holder jump tracks the parent's price drop on the ex-date (correlation -0.87, KAR -60% and 15x holders) and comes with heavy volume. Retail buying the apparent drop: flow.
+- **Forward splits:** holders rise on the day, by 7% on average (median 4%, 16 splits above 100 holders), and keep climbing. Retail buying the cheaper shares.
+- **Reverse splits:** holders drop about 30% on the day (mean −29%, median −33%, 7 reverse splits above 100 holders), consistent with holders of fewer shares than the ratio being cashed out. Kept anyway.
+- **Spin-off parents:** holders jump around the ex-date, with heavy volume. Retail buying the apparent price drop: flow.
 - **Spin-off children:** holders climb smoothly with volume rather than in one delivery step. Flow.
 - **Ticker, name and CUSIP changes:** no effect once matched by PERMNO. The large moves are reverse splits and mergers under another label.
-- **Stock-merger acquirers:** holders rise one to one with the target's last count over days 0 to 5 (MPC +264 against Andeavor's 263; correlation 0.77). Positions are converted, not bought. Left in, because it touches only a handful of rows above 100 holders and the daily clipping caps them.
+- **Stock-merger acquirers:** holders rise roughly one to one with the target's last count over the days after the merger. Positions are converted, not bought. Left in, because it touches only a handful of rows above 100 holders and the daily clipping caps them.
 
 ## 6. Daily data
 
-- **T1, close counts:** one per PERMNO per trading day, the first reading in the close window. Each close carries a **segment** that changes at every C2 break and after every C5 run. 23 trading days have no close at all (the outages).
-- **T2, daily changes:** taken only between consecutive trading days that both have a close in the same segment, with a previous close above 0. Otherwise the change is missing and a status says why. A change never spans an outage.
+- **T1, daily counts:** one per PERMNO per trading day, the first reading in the 15:40 to 15:50 window. Each count carries a **segment** that changes at every C2 break and after every C5 run. 34 trading days have no count at all (the outages, and days the 15:40 sweep did not reach any stock before 15:50).
+- **T2, daily changes:** taken only between consecutive trading days that both have a count in the same segment, with a previous count above 0. Otherwise the change is missing and a status says why. A change never spans an outage.
 - **CRSP join:** columns are named by when they are known: `*_prev` (day t-1, known at 15:50), `*_t` (only after day t's close), and `ret_next` (day t's close to the next trading day's close, the return to predict). Prices are as traded, never split-adjusted, because CRSP's adjustment factors carry later splits back in time. Delisting returns are part of CRSP's daily returns. A delisting payoff (`DD`) is kept and flagged, because it can span more than one day.
 
 ## 7. Filters from the literature
@@ -87,21 +88,21 @@ The holder floor matters most. Stocks under 100 holders cause most of the extrem
 
 ## 9. The two clean panels (`data/intermediate/clean/`)
 
-**Holder panel (`holders_*.parquet`), for nowcasting the change in holders.** Rows: a usable change, a price of at least $1 and at least 100 holders at the previous close. Target `y`:
+**Holder panel (`holders_*.parquet`), for nowcasting the change in holders.** Rows: a usable change, a price of at least $1 and at least 100 holders at the previous count. Target `y`:
 
-1. compute log(1 + h_t) - log(1 + h_{t-1});
+1. compute log(1 + h_t) - log(1 + h_{t-1}), with h the day's 15:40 count;
 2. clip at that day's 1st and 99th percentiles;
 3. demean within the day.
 
-Units and floor were compared on train: taking logs cuts kurtosis from 389,105 to about 700, and the floor removes the lumpy small-count changes. Clipping per day keeps each day independent of every other.
+Units and floor were compared on train: taking logs cuts the excess kurtosis of the daily change from 523,701 to about 700, and the floor removes the lumpy small-count changes. Clipping per day keeps each day independent of every other.
 
 **Return panel (`returns_*.parquet`), for predicting next-day returns.**
 
-- **Rows:** every stock-day in the **15:50 universe**: a price of at least $1 and at least 100 holders at day t-1's close. Nothing from day t is used to choose the rows; a stock stays even if day t's reading is missing.
+- **Rows:** every stock-day in the **15:50 universe**: a price of at least $1 and at least 100 holders at day t-1's count. Nothing from day t is used to choose the rows; a stock stays even if day t's reading is missing.
 - **X:** day t-1's % change in holders (`rh_pct_lag1`) and features of its history up to day t-1: acceleration, square, 20-day volatility, 20-day mean, squared deviation from the 20-day mean, and deviation from the 60-day mean. Raw values only: winsorizing and z-scores depend on the universe, so `02_robintrack_returns.py` does them each day within the universe it picks.
 - **y:** `ret_next`, the next-day return; 02 demeans it within its universe each day.
 - **Classification:** `is_common` and `security_type` (common stock, foreign common stock, ADR, REIT, ETF, closed-end fund, unit or other), from CRSP's name record on day t.
-- **Upper bound only:** day t's own change (`rh_pct_t`), known only after the close.
+- **Model 1's target, kept apart:** day t's own change (`rh_pct_t`). Both of its counts are retrieved before 15:50, so it is known at the decision, but it is what Model 1 nowcasts, so the X features keep their one-day lag.
 
 ## 10. Checks before writing
 
@@ -119,6 +120,6 @@ Train and test go to separate files, so estimation (`02_robintrack_returns.py`) 
 
 ## Open items
 
-- **2018-10-09:** the close sweep reached only 20% of stocks; it is not yet treated as an outage.
+- **Partial sweeps:** on 2019-08-30 and on five days in March 2020 the sweep reached only 58% to 69% of a normal day's stocks by 15:50. Which stocks are missing depends on how far the sweep had got, not on their holders. Those days are kept.
 - **Corporate events are not treated** (see section 5). Merger conversions into the acquirer are known not to be flow; they could be netted out with the target's last holder count if they turn out to matter.
 - **Market cap** uses CRSP's share count, which can be dated before it was public.

@@ -817,11 +817,11 @@ def _(mo):
     mo.md(r"""
     ## C4: outages
 
-    Robintrack swept every hour around the clock, so more than 1.5 hours without a reading for any PERMNO means at least one sweep was missed. Each outage is listed with the weekday closes it wipes out: no reading in the 16:40 to 16:59 New York window, which is the reading that becomes the close. Holidays are not separated out until there is a trading calendar.
+    Robintrack swept every hour around the clock, so more than 1.5 hours without a reading for any PERMNO means at least one sweep was missed. Each outage is listed with the weekday counts it wipes out: no reading in the 15:40 to 15:50 New York window, which is the reading that becomes the day's count. Holidays are not separated out until there is a trading calendar.
 
-    Why that window: Robintrack's counts lag the time they were read by about 25 to 40 minutes. Readings taken as late as 9:55 do not yet show the 9:30 open, and readings at 19:40 show no after-hours trading, which ended at 18:00. Sweeps run between :40 and :59 past the hour, so the 16:4x reading shows holdings at about 16:00 to 16:35 (the full session plus a few minutes of after-hours), while the 15:4x reading misses the last 30 to 60 minutes of trading. Any lag in that range picks the same reading.
+    Why that window: it is the last reading retrieved before the 15:50 market-on-close cutoff, so the day's count is known at the decision. Robintrack's counts lag the time they were read by about 25 to 40 minutes (readings taken as late as 9:55 do not yet show the 9:30 open, and readings at 19:40 show no after-hours trading, which ended at 18:00), so the 15:4x reading shows holdings at about 15:00 to 15:25. Sweeps run between :40 and :59 past the hour; readings retrieved at 15:50 or later are after the cutoff and are not used.
 
-    Nothing is dropped here. Outages are handled in the target: a daily change is taken only between two consecutive trading days that both have a close value, so the first day after an outage has a close but no change, and changes resume the day after. The same rule covers a single PERMNO missing a close while the rest are fine. A percentage change whose previous close is 0 is undefined and left missing; that comes from real zero holders, not from outages.
+    Nothing is dropped here. Outages are handled in the target: a daily change is taken only between two consecutive trading days that both have a count, so the first day after an outage has a count but no change, and changes resume the day after. The same rule covers a single PERMNO missing a count while the rest are fine. A percentage change whose previous count is 0 is undefined and left missing; that comes from real zero holders, not from outages.
     """)
     return
 
@@ -836,44 +836,44 @@ def _(np, pd, rt_ts):
     })
     c4_outages["hours"] = (c4_outages["first_reading_after"] - c4_outages["last_reading_before"]).dt.total_seconds() / 3600
 
-    CLOSE_WINDOW = (pd.Timedelta(hours=16, minutes=40), pd.Timedelta(hours=17))  # New York time; the reading that becomes the close
+    COUNT_WINDOW = (pd.Timedelta(hours=15, minutes=40), pd.Timedelta(hours=15, minutes=50))  # New York time; the reading that becomes the day's count
 
 
-    def _closes_lost(before, after):
-        """Weekdays whose whole close window falls inside the outage."""
+    def _counts_lost(before, after):
+        """Weekdays whose whole count window falls inside the outage."""
         before_ny, after_ny = before.tz_convert("America/New_York"), after.tz_convert("America/New_York")
         days = pd.date_range(before_ny.normalize(), after_ny.normalize(), freq="B")
         return [
             d.strftime("%Y-%m-%d") for d in days
-            if before_ny < d + CLOSE_WINDOW[0] and after_ny >= d + CLOSE_WINDOW[1]
+            if before_ny < d + COUNT_WINDOW[0] and after_ny >= d + COUNT_WINDOW[1]
         ]
 
 
-    c4_outages["weekday_closes_lost"] = [
-        _closes_lost(b, a) for b, a in zip(c4_outages["last_reading_before"], c4_outages["first_reading_after"])
+    c4_outages["weekday_counts_lost"] = [
+        _counts_lost(b, a) for b, a in zip(c4_outages["last_reading_before"], c4_outages["first_reading_after"])
     ]
-    c4_outages["n_closes_lost"] = c4_outages["weekday_closes_lost"].str.len()
+    c4_outages["n_counts_lost"] = c4_outages["weekday_counts_lost"].str.len()
 
-    # Direct check, independent of the outage list: weekdays with no reading at all inside the close window
+    # Direct check, independent of the outage list: weekdays with no reading at all inside the count window
     _ny = pd.DatetimeIndex(_t).tz_localize("UTC").tz_convert("America/New_York")
     _clock = _ny - _ny.normalize()
-    _read = set(_ny[(_clock >= CLOSE_WINDOW[0]) & (_clock < CLOSE_WINDOW[1])].strftime("%Y-%m-%d"))
-    c4_no_close_days = [d for d in pd.bdate_range("2018-05-02", "2020-08-13").strftime("%Y-%m-%d") if d not in _read]
-    return CLOSE_WINDOW, c4_no_close_days, c4_outages
+    _read = set(_ny[(_clock >= COUNT_WINDOW[0]) & (_clock < COUNT_WINDOW[1])].strftime("%Y-%m-%d"))
+    c4_no_count_days = [d for d in pd.bdate_range("2018-05-02", "2020-08-13").strftime("%Y-%m-%d") if d not in _read]
+    return COUNT_WINDOW, c4_no_count_days, c4_outages
 
 
 @app.cell
-def _(c4_no_close_days, c4_outages, mo):
+def _(c4_no_count_days, c4_outages, mo):
     _o = c4_outages
-    _in_outages = {d for _days in _o["weekday_closes_lost"] for d in _days}
-    _elsewhere = sorted(set(c4_no_close_days) - _in_outages)
+    _in_outages = {d for _days in _o["weekday_counts_lost"] for d in _days}
+    _elsewhere = sorted(set(c4_no_count_days) - _in_outages)
     mo.vstack([
         mo.md(f"""
     - **Outages (more than 1.5 hours without any reading):** {len(_o):,}, {_o["hours"].sum():,.0f} hours in total; longest {_o["hours"].max():,.1f} hours
-    - **Weekday closes lost:** {_o["n_closes_lost"].sum():,}, in {(_o["n_closes_lost"] > 0).sum():,} outages
-    - **Direct check, weekdays with no reading at 16:40 to 16:59:** {len(c4_no_close_days):,}; {"all inside the outages below" if not _elsewhere else "outside any outage: " + ", ".join(_elsewhere)}
+    - **Weekday counts lost:** {_o["n_counts_lost"].sum():,}, in {(_o["n_counts_lost"] > 0).sum():,} outages
+    - **Direct check, weekdays with no reading at 15:40 to 15:50:** {len(c4_no_count_days):,}; {"all inside the outages below" if not _elsewhere else "outside any outage: " + ", ".join(_elsewhere)}
     """),
-        mo.ui.table(_o.assign(weekday_closes_lost=_o["weekday_closes_lost"].str.join(", ")).sort_values("last_reading_before")),
+        mo.ui.table(_o.assign(weekday_counts_lost=_o["weekday_counts_lost"].str.join(", ")).sort_values("last_reading_before")),
     ])
     return
 
@@ -1176,11 +1176,11 @@ def _(mo, np, pd, rt_dropped, rt_permno, rt_ts):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## T1: daily close counts
+    ## T1: daily counts
 
-    One number per PERMNO per trading day: the first reading taken between 16:40 and 16:59 New York time (C4 explains the window), from the rows kept after C1 to C5. No reading in the window means no close that day. Readings on weekends and holidays are not used; the trading days come from CRSP's daily index file (`dsi.csv`).
+    One number per PERMNO per trading day: the first reading retrieved between 15:40 and 15:50 New York time (C4 explains the window), from the rows kept after C1 to C5. No reading in the window means no count that day; there is no fallback to an earlier sweep. Readings on weekends and holidays are not used; the trading days come from CRSP's daily index file (`dsi.csv`).
 
-    Each close carries its **segment**. A new segment starts at every switch to another raw file (C2) and after every run of zeros (C5), and T2 never takes a change across two segments.
+    Each count carries its **segment**. A new segment starts at every switch to another raw file (C2) and after every run of zeros (C5), and T2 never takes a change across two segments.
     """)
     return
 
@@ -1196,7 +1196,7 @@ def _(CRSP_NAMES_PATH, pd):
 
 @app.cell
 def _(
-    CLOSE_WINDOW,
+    COUNT_WINDOW,
     TRADING_DAYS,
     c5_zero_run,
     np,
@@ -1214,52 +1214,52 @@ def _(
     _new_segment = np.r_[True, (_permno[1:] != _permno[:-1]) | (_file[1:] != _file[:-1]) | (_c5[:-1] & ~_c5[1:])]
     _segment = np.cumsum(_new_segment)
 
-    # readings in the close window; prefilter on the UTC clock (New York is UTC-4 in summer, UTC-5 in winter)
+    # readings in the count window; prefilter on the UTC clock (New York is UTC-4 in summer, UTC-5 in winter)
     _sod = rt_ts.to_numpy().astype("datetime64[s]").astype(np.int64) % 86400
-    _lo, _hi = (int(w.total_seconds()) for w in CLOSE_WINDOW)
+    _lo, _hi = (int(w.total_seconds()) for w in COUNT_WINDOW)
     _near = np.zeros(len(_sod), dtype=bool)
     for _h in (4, 5):
         _near |= (_sod - _h * 3600 >= _lo) & (_sod - _h * 3600 < _hi)
     _cand = np.flatnonzero(~_drop & _near)
     _ny = pd.DatetimeIndex(rt_ts.to_numpy()[_cand]).tz_localize("UTC").tz_convert("America/New_York")
     _clock = _ny - _ny.normalize()
-    _in = (_clock >= CLOSE_WINDOW[0]) & (_clock < CLOSE_WINDOW[1])
+    _in = (_clock >= COUNT_WINDOW[0]) & (_clock < COUNT_WINDOW[1])
     _idx = _cand[_in]
     _window = pd.DataFrame({
         "permno": _permno[_idx],
         "date": _ny[_in].tz_localize(None).normalize(),
-        "close_ts": _ny[_in].tz_convert("UTC"),
+        "count_ts": _ny[_in].tz_convert("UTC"),
         "holders": rt_permno["users_holding"].to_numpy()[_idx],
         "segment": _segment[_idx],
     })
     _trading = _window["date"].isin(TRADING_DAYS)
     # rows are in time order within each PERMNO, so the first row of a PERMNO-day is its first reading in the window
-    t1_close = _window[_trading].drop_duplicates(["permno", "date"], keep="first").reset_index(drop=True)
+    t1_count = _window[_trading].drop_duplicates(["permno", "date"], keep="first").reset_index(drop=True)
     t1_summary = pd.DataFrame({
         "readings_in_window": [len(_window)],
         "readings_on_non_trading_days": [int((~_trading).sum())],
-        "permno_days_with_close": [len(t1_close)],
+        "permno_days_with_count": [len(t1_count)],
         "permno_days_with_2plus_readings": [int(_window[_trading].groupby(["permno", "date"]).size().gt(1).sum())],
-        "permnos_with_a_close": [t1_close["permno"].nunique()],
+        "permnos_with_a_count": [t1_count["permno"].nunique()],
         "trading_days": [len(TRADING_DAYS)],
-        "trading_days_without_any_close": [len(TRADING_DAYS.difference(pd.DatetimeIndex(t1_close["date"].unique())))],
+        "trading_days_without_any_count": [len(TRADING_DAYS.difference(pd.DatetimeIndex(t1_count["date"].unique())))],
     })
-    return t1_close, t1_summary
+    return t1_count, t1_summary
 
 
 @app.cell
-def _(TRADING_DAYS, mo, plt, t1_close, t1_summary):
+def _(TRADING_DAYS, mo, plt, t1_count, t1_summary):
     _s = t1_summary.iloc[0]
-    _per_day = t1_close.groupby("date").size().reindex(TRADING_DAYS, fill_value=0)
+    _per_day = t1_count.groupby("date").size().reindex(TRADING_DAYS, fill_value=0)
     _fig, _ax = plt.subplots(figsize=(9, 3))
     _ax.plot(_per_day.index, _per_day.to_numpy(), lw=0.8)
-    _ax.set_ylabel("PERMNOs with a close")
-    _ax.set_title("PERMNOs with a close count, by trading day")
+    _ax.set_ylabel("PERMNOs with a count")
+    _ax.set_title("PERMNOs with a daily count, by trading day")
     _fig.tight_layout()
     mo.vstack([
         mo.md(f"""
-    - **Closes:** {_s["permno_days_with_close"]:,} PERMNO-days, {_s["permnos_with_a_close"]:,} PERMNOs, {_s["trading_days"]:,} trading days
-    - **Trading days with no close for any PERMNO:** {_s["trading_days_without_any_close"]:,} (the outages in C4)
+    - **Daily counts:** {_s["permno_days_with_count"]:,} PERMNO-days, {_s["permnos_with_a_count"]:,} PERMNOs, {_s["trading_days"]:,} trading days
+    - **Trading days with no count for any PERMNO:** {_s["trading_days_without_any_count"]:,} (the outages in C4)
     - **PERMNO-days with two or more readings in the window:** {_s["permno_days_with_2plus_readings"]:,}; the first is used
     - **Window readings on weekends and holidays, not used:** {_s["readings_on_non_trading_days"]:,}
     """),
@@ -1273,7 +1273,7 @@ def _(mo):
     mo.md(r"""
     ## T2: daily changes
 
-    The change in holders from the previous trading day's close to today's. It is taken only when both closes exist, they are in the same segment and the previous close is above 0; otherwise it is missing and `status` says why.
+    The change in holders from the previous trading day's count to today's. It is taken only when both counts exist, they are in the same segment and the previous count is above 0; otherwise it is missing and `status` says why.
 
     Everything here is mechanical. The choices made by looking at the data (the target's units, holder floors, winsorizing, which stocks to demean across, and the corporate-event exclusions) wait for the train/test split. The RTX restart shows why the corporate-event exclusion is needed: after the break on 2020-04-03 the new instrument climbs 2,323, 4,561, 6,575, 8,201 holders, positions moved over from UTX rather than buying.
     """)
@@ -1281,8 +1281,8 @@ def _(mo):
 
 
 @app.cell
-def _(TRADING_DAYS, np, pd, t1_close):
-    _c = t1_close.sort_values(["permno", "date"]).reset_index(drop=True)
+def _(TRADING_DAYS, np, pd, t1_count):
+    _c = t1_count.sort_values(["permno", "date"]).reset_index(drop=True)
     _day_no = pd.Series(TRADING_DAYS.get_indexer(_c["date"]))
     _same_permno = _c["permno"].eq(_c["permno"].shift())
     _prev = _c["holders"].shift()
@@ -1294,10 +1294,10 @@ def _(TRADING_DAYS, np, pd, t1_close):
             _prev.eq(0),
         ],
         [
-            "first close of the PERMNO",
-            "previous trading day has no close",
-            "break since the previous close",
-            "previous close is 0",
+            "first count of the PERMNO",
+            "previous trading day has no count",
+            "break since the previous count",
+            "previous count is 0",
         ],
         default="ok",
     )
@@ -1315,7 +1315,7 @@ def _(mo, t2_change):
     _st = t2_change["status"].value_counts().rename_axis("status").reset_index(name="permno_days")
     _st["share"] = (_st["permno_days"] / len(t2_change)).round(4)
     mo.vstack([
-        mo.md(f"**Daily changes:** {int((t2_change['status'] == 'ok').sum()):,} of {len(t2_change):,} PERMNO-days with a close"),
+        mo.md(f"**Daily changes:** {int((t2_change['status'] == 'ok').sum()):,} of {len(t2_change):,} PERMNO-days with a count"),
         mo.ui.table(_st),
     ])
     return
@@ -1323,7 +1323,7 @@ def _(mo, t2_change):
 
 @app.cell
 def _(t2_change):
-    # the % change in holders from the previous close to day t's, where the change is usable; the return panel's features use it
+    # the % change in holders from the previous count to day t's, where the change is usable; the return panel's features use it
     t2_pct = (t2_change["change"] / t2_change["holders_prev"]).astype(float).where(t2_change["status"].eq("ok"))
     return (t2_pct,)
 
@@ -1397,10 +1397,10 @@ def _(mo):
 
     Everything above is shared. Two panels come out of it, built separately below:
 
-    - **Holder panel** (Model 1's target): one row per PERMNO-day with a usable change in holders. Its label is day t's change, so it needs day t's close count.
-    - **Return panel** (the return tests in 02): one row per stock and day t in the universe known at 15:50 on day t. The decision is made at 15:50, so which stocks are in it can only use what was known then, never day t's close count.
+    - **Holder panel** (Model 1's target): one row per PERMNO-day with a usable change in holders. Its label is day t's change, so it needs day t's count.
+    - **Return panel** (the return tests in 02): one row per stock and day t in the universe known at 15:50 on day t. The decision is made at 15:50, so which stocks are in it can only use what was known then; it uses day t-1's count.
 
-    Both use the same thresholds, from the literature (see the holder panel's sample filters): a CRSP price of at least $1 (Eaton et al.) and at least 100 Robinhood holders (Barber et al.) at day t-1's close. Both use the same train/test split.
+    Both use the same thresholds, from the literature (see the holder panel's sample filters): a CRSP price of at least $1 (Eaton et al.) and at least 100 Robinhood holders (Barber et al.) at day t-1's count. Both use the same train/test split.
     """)
     return
 
@@ -1415,7 +1415,7 @@ def _(mo):
     - **Train:** trading days 2018-05-02 to 2019-12-11.
     - **Test:** trading days 2019-12-12 to 2020-08-13. It starts the day Robinhood launched fractional shares, so it checks whether Model 1 survives that break; it also holds the January 2020 outage and the COVID period.
 
-    Changes are assigned by their date: the change on 2019-12-12 (from the 2019-12-11 close) is a test row. The return panel also drops training rows whose next-day return ends on or after the split, so no training label reaches into the test period. Test is only counted. No cell looks at its values until the training-period choices are frozen.
+    Changes are assigned by their date: the change on 2019-12-12 (from the 2019-12-11 count) is a test row. The return panel also drops training rows whose next-day return ends on or after the split, so no training label reaches into the test period. Test is only counted. No cell looks at its values until the training-period choices are frozen.
     """)
     return
 
@@ -1486,7 +1486,7 @@ def _(mo):
     | Column | Rule | From | Point-in-time form |
     |---|---|---|---|
     | `price_ok` | price of at least $1 | Eaton et al. (the price on day t-1) | CRSP price on the previous trading day |
-    | `holders_ok` | at least 100 Robinhood holders | Barber et al. (`users_close(t-1) >= 100`); Eaton et al. use 50 | close count on the previous trading day |
+    | `holders_ok` | at least 100 Robinhood holders | Barber et al. (`users_close(t-1) >= 100`); Eaton et al. use 50 | count on the previous trading day |
     | `is_common` | common stock, CRSP share code 10 or 11 | Ardia et al., Da, Fang & Lin, Eaton et al. | CRSP's classification on day t: equity, common, ordinary shares, US-incorporated, not a REIT |
     | `major_exchange` | NYSE, NYSE American or Nasdaq | Da, Fang & Lin (exchange codes 1 to 3) | CRSP's primary exchange on day t |
 
@@ -1566,7 +1566,7 @@ def _(mo):
     In-sample training rows (CRSP price of at least $1 the day before). Two variables:
 
     - **Return:** `ret_next`, the total return from day t's close to the next trading day's close.
-    - **Change in Robinhood holders:** `change / holders_prev`, the percentage change from the previous trading day's close count to day t's, on rows whose change is usable (T2 status `ok`, so the previous close is above 0).
+    - **Change in Robinhood holders:** `change / holders_prev`, the percentage change from the previous trading day's count to day t's, on rows whose change is usable (T2 status `ok`, so the previous count is above 0).
 
     Left: the middle 98% of each distribution. Right: the tails, as the share of observations at least as far out as each value, on log scales (a straight line means a power-law tail).
     """)
@@ -1640,13 +1640,13 @@ def _(mo):
     mo.md(r"""
     ## Holder floors and the target's units (train)
 
-    In-sample training rows with a usable change, from the previous trading day's close count $h_0$ to day t's $h_1$, in three units:
+    In-sample training rows with a usable change, from the previous trading day's count $h_0$ to day t's $h_1$, in three units:
 
     - **% change:** $h_1 / h_0 - 1$
     - **log change:** $\log(h_1 / h_0)$; undefined when $h_1 = 0$, so those rows drop out of this unit
     - **change in log(1 + holders):** $\log(1 + h_1) - \log(1 + h_0)$; defined everywhere
 
-    Each is shown under floors on the previous close ($h_0 \geq$ floor), the point-in-time form of Barber et al.'s `users_close(t-1) >= 100`. A floor of 1 is no floor: a change already needs a previous close above 0. Kurtosis is unstable with tails this heavy, so the table also gives it after clipping the 0.1% tails.
+    Each is shown under floors on the previous count ($h_0 \geq$ floor), the point-in-time form of Barber et al.'s `users_close(t-1) >= 100`. A floor of 1 is no floor: a change already needs a previous count above 0. Kurtosis is unstable with tails this heavy, so the table also gives it after clipping the 0.1% tails.
     """)
     return
 
@@ -1738,12 +1738,12 @@ def _(mo):
 
     Chosen on train above, and applied with the same fixed rules to train and test separately; the test result is never summarized.
 
-    1. **Rows:** a usable change (T2 status `ok`), a CRSP price of at least $1 the day before (`in_sample`), and at least 100 holders at the previous close (`holders_ok`, Barber et al.'s `users_close(t-1) >= 100`). These rows are `in_target`, and only they are kept in the holder files. The return panel defines its own universe from day t-1 information.
-    2. **Unit:** `y_raw` $= \log(1 + h_t) - \log(1 + h_{t-1})$, the change in log holders from the previous close to day t's.
+    1. **Rows:** a usable change (T2 status `ok`), a CRSP price of at least $1 the day before (`in_sample`), and at least 100 holders at the previous count (`holders_ok`, Barber et al.'s `users_close(t-1) >= 100`). These rows are `in_target`, and only they are kept in the holder files. The return panel defines its own universe from day t-1 information.
+    2. **Unit:** `y_raw` $= \log(1 + h_t) - \log(1 + h_{t-1})$, the change in log holders from the previous trading day's count to day t's.
     3. **Clip within the day:** `y_clipped` is clipped at that day's 1st and 99th cross-sectional percentiles, so each day uses only its own cross-section.
     4. **Demean within the day:** `y` is `y_clipped` minus that day's cross-sectional mean.
 
-    `y` is known only after day t's close: a label, never an input.
+    `y` is a label, never an input to Model 1: Model 1 nowcasts it from TAQ data before 15:50.
     """)
     return
 
@@ -1821,10 +1821,10 @@ def _(mo):
     mo.md(r"""
     # Return panel (the 15:50 universe)
 
-    - **Rows:** every stock and trading day t in the **15:50 universe**: a CRSP price of at least $1 and at least 100 Robinhood holders at day t-1's close. A stock stays in even if day t's close reading is missing or a break follows.
+    - **Rows:** every stock and trading day t in the **15:50 universe**: a CRSP price of at least $1 and at least 100 Robinhood holders at day t-1's count. A stock stays in even if day t's count is missing or a break follows.
     - **X, known by 15:50 on day t:** `rh_pct_lag1`, the % change in holders on day t-1 (from T2; missing if day t-1 had no usable change).
     - **Features of the holder-change history, known by 15:50 on day t** (built on each PERMNO's whole daily history, all ending at day t-1's change $g_{t-1}$): `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$; `rh_pct_sq_lag1` $= g_{t-1}^2$; `rh_pct_vol_lag1`, the standard deviation of $g$ over the last 20 trading days (at least 10 changes); `rh_pct_mean_lag1`, the mean of $g$ over the same 20 days; `rh_pct_sqdev_lag1` $= (g_{t-1} - \bar g)^2$, with $\bar g$ the mean over the 20 trading days before (at least 10 changes); `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes). The volatility and the squared deviation are also built over a grid of windows, `rh_pct_vol{n}_lag1` and `rh_pct_sqdev{n}_lag1` for n of 5, 10, 20, 40 and 60 trading days (at least n/2 changes), so 02 can choose the window on train.
-    - **Upper bound only, known after day t's close:** `rh_pct_t`, day t's own change, missing when day t has no usable change.
+    - **Also known by 15:50 on day t, kept apart:** `rh_pct_t`, day t's own change (both counts are retrieved before the cutoff), missing when day t has no usable change. It is what Model 1 nowcasts, so the features above keep their one-day lag.
     - **y:** `ret_next`, CRSP's total return from day t's close to the next trading day's close. Kept when CRSP's return covers one trading day (D1 to D4, DU) or is a delisting payoff (DD). A delisting payoff can span more than a day, so those rows carry `ret_next_is_delisting`.
     - **Also:** `ret_prev`, `price_prev`, `cap_prev`, `dollar_volume_prev` (day t-1), and `is_common` and `security_type` (day t): CRSP's classification into common stock, foreign common stock, ADR, REIT, ETF, closed-end fund, unit or other.
     - **Not here:** demeaning, winsorizing and z-scores. They depend on which stocks are in the universe, so `02_robintrack_returns.py` does them each day within the universe it picks.
@@ -1837,7 +1837,7 @@ def _(TRADING_DAYS, pd, t2_change, t2_pct):
     # Features of the daily % change in holders, built from each PERMNO's whole daily history on the trading-day grid
     # (not only universe rows), so a rolling window always spans consecutive trading days. A day without a usable change
     # is missing and does not count. Each row is keyed by the day of the change; the return panel joins it as day t-1,
-    # so every feature uses closes up to day t-1 only.
+    # so every feature uses counts up to day t-1 only.
     HOLDER_VOL_WINDOW, HOLDER_MEAN_WINDOW = 20, 60  # trading days, about one and three months
     _pct = t2_pct
     _wide = (
@@ -1883,15 +1883,15 @@ def _(
     holder_change_features,
     is_common_stock,
     np,
-    t1_close,
+    t1_count,
     t2_change,
     t2_pct,
 ):
     # One row per stock and day t in the universe known at 15:50 on day t: a CRSP price of at least $1 and at least
-    # 100 holders at day t-1's close, whatever happens on day t. Nothing here needs day t's close reading.
-    _close = t1_close[["permno", "date", "holders"]]
-    _r = _close.rename(columns={"date": "prev_day", "holders": "holders_close_prev"}).assign(
-        date=ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_indexer(_close["date"]) + 1]
+    # 100 holders at day t-1's count, whatever happens on day t. Nothing here needs day t's count.
+    _count = t1_count[["permno", "date", "holders"]]
+    _r = _count.rename(columns={"date": "prev_day", "holders": "holders_count_prev"}).assign(
+        date=ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_indexer(_count["date"]) + 1]
     )
     _r = _r[_r["date"].isin(TRADING_DAYS)]
     _r["next_day"] = ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_indexer(_r["date"]) + 1]
@@ -1907,7 +1907,7 @@ def _(
         .merge(_prev, on=["permno", "prev_day"], how="left")
         .merge(_next, on=["permno", "next_day"], how="left")
     )
-    _r = _r[_r["price_prev"].ge(PRICE_MIN) & _r["holders_close_prev"].ge(HOLDERS_MIN)].copy()
+    _r = _r[_r["price_prev"].ge(PRICE_MIN) & _r["holders_count_prev"].ge(HOLDERS_MIN)].copy()
 
     # the return to predict: one trading day (D1 to D4, DU), or a delisting payoff (DD), flagged because its span is not one day
     _r["ret_next"] = _r["ret_next"].where(_r["ret_next_span"].str.fullmatch(ONE_TRADING_DAY_SPANS).fillna(False))
@@ -1935,7 +1935,7 @@ def _(
 
     returns_panel = _r.sort_values(["permno", "date"]).reset_index(drop=True)
     FEATURES_AT_1550 = ["rh_pct_lag1", *HOLDER_CHANGE_FEATURES]
-    FEATURES_AFTER_CLOSE = ["rh_pct_t"]
+    FEATURES_AFTER_CLOSE = ["rh_pct_t"]  # known by 15:50, but kept apart as Model 1's target
     return FEATURES_AFTER_CLOSE, FEATURES_AT_1550, returns_panel
 
 
@@ -1978,7 +1978,7 @@ def _(
     _tr = returns_panel[returns_panel["date"] < SPLIT_DATE]
     _cov = pd.DataFrame({
         "column": FEATURES_AT_1550 + FEATURES_AFTER_CLOSE + ["ret_next"],
-        "known": ["by 15:50 on day t"] * len(FEATURES_AT_1550) + ["after day t's close"] * len(FEATURES_AFTER_CLOSE) + ["after the next close"],
+        "known": ["by 15:50 on day t"] * len(FEATURES_AT_1550) + ["by 15:50 on day t (Model 1's target)"] * len(FEATURES_AFTER_CLOSE) + ["after the next close"],
     })
     _cov["share_available_on_train"] = [round(float(_tr[c].notna().mean()), 3) for c in _cov["column"]]
     mo.vstack([
@@ -1995,8 +1995,8 @@ def _(mo):
 
     What `returns_train` looks like, the rows `02_robintrack_returns.py` reads: every stock-day in the 15:50 universe on train. Nothing here changes the data.
 
-    - **Holders:** `holders_close_prev`, the count at day t-1's close.
-    - **Holder change:** `rh_pct_lag1`, the % change into day t-1's close, plus its 20-day volatility and squared value.
+    - **Holders:** `holders_count_prev`, day t-1's count.
+    - **Holder change:** `rh_pct_lag1`, the % change into day t-1's count, plus its 20-day volatility and squared value.
     - **Market data at t-1:** price, market cap, dollar volume, turnover (dollar volume / market cap) and the day's return `ret_prev`.
     - **Target:** `ret_next`, the return from day t's close to the next.
     """)
@@ -2006,7 +2006,7 @@ def _(mo):
 @app.cell
 def _(pd, returns_train):
     OVERVIEW_COLUMNS = {
-        "holders_close_prev": "holders at t-1",
+        "holders_count_prev": "holders at t-1",
         "rh_pct_lag1": "holder % change, t-1",
         "rh_pct_vol_lag1": "holder % change volatility, 20d",
         "rh_pct_sq_lag1": "holder % change squared",
@@ -2044,7 +2044,7 @@ def _(pd, returns_train):
         days=("date", "size"),
         first_day=("date", "min"),
         last_day=("date", "max"),
-        median_holders=("holders_close_prev", "median"),
+        median_holders=("holders_count_prev", "median"),
         median_cap=("cap_prev", "median"),
         median_dollar_volume=("dollar_volume_prev", "median"),
         median_price=("price_prev", "median"),
@@ -2056,8 +2056,8 @@ def _(pd, returns_train):
     )
     overview_per_day = overview_train.groupby("date").agg(
         stocks=("permno", "size"),
-        median_holders=("holders_close_prev", "median"),
-        total_holders=("holders_close_prev", "sum"),
+        median_holders=("holders_count_prev", "median"),
+        total_holders=("holders_count_prev", "sum"),
         holder_pct_change_p10=("rh_pct_lag1", lambda s: s.quantile(0.1)),
         holder_pct_change_p50=("rh_pct_lag1", "median"),
         holder_pct_change_p90=("rh_pct_lag1", lambda s: s.quantile(0.9)),
@@ -2087,7 +2087,7 @@ def _(
 ):
     _ps = overview_per_stock
     _days = overview_per_day["stocks"]
-    _rank_cols = ["holders_close_prev", "cap_prev", "dollar_volume_prev", "turnover_prev", "price_prev",
+    _rank_cols = ["holders_count_prev", "cap_prev", "dollar_volume_prev", "turnover_prev", "price_prev",
                   "rh_pct_lag1", "rh_pct_vol_lag1", "ret_prev", "ret_next"]
     _spearman = overview_train[_rank_cols].sample(200_000, random_state=0).corr(method="spearman").rename(
         index=OVERVIEW_COLUMNS, columns=OVERVIEW_COLUMNS)
@@ -2114,7 +2114,7 @@ def _(
 @app.cell
 def _(OVERVIEW_COLUMNS, np, overview_train, plt):
     _fig, _axes = plt.subplots(3, 4, figsize=(16, 10))
-    _log_vars = ["holders_close_prev", "price_prev", "cap_prev", "dollar_volume_prev", "turnover_prev", "rh_pct_vol_lag1"]
+    _log_vars = ["holders_count_prev", "price_prev", "cap_prev", "dollar_volume_prev", "turnover_prev", "rh_pct_vol_lag1"]
     _mid_vars = ["rh_pct_lag1", "rh_pct_accel_lag1", "rh_pct_dev_lag1", "rh_pct_sq_lag1", "ret_prev", "ret_next"]
     for _ax, _c in zip(_axes.flat[:6], _log_vars):
         _s = overview_train[_c].dropna()
@@ -2165,12 +2165,12 @@ def _(overview_per_day, plt):
 @app.cell
 def _(mo, overview_train, plt):
     # who owns what: holders and the holder change against size, by market-cap decile within each day
-    _t = overview_train[["date", "cap_prev", "holders_close_prev", "rh_pct_lag1", "rh_pct_vol_lag1", "ret_next", "turnover_prev"]].dropna(subset=["cap_prev"])
+    _t = overview_train[["date", "cap_prev", "holders_count_prev", "rh_pct_lag1", "rh_pct_vol_lag1", "ret_next", "turnover_prev"]].dropna(subset=["cap_prev"])
     _t = _t.assign(cap_decile=_t.groupby("date")["cap_prev"].rank(pct=True).mul(10).clip(upper=9.999).astype(int) + 1)
     overview_by_size = _t.groupby("cap_decile").agg(
         stock_days=("date", "size"),
         median_cap_musd=("cap_prev", lambda s: s.median() / 1e3),
-        median_holders=("holders_close_prev", "median"),
+        median_holders=("holders_count_prev", "median"),
         median_holder_pct_change=("rh_pct_lag1", "median"),
         holder_pct_change_abs_mean=("rh_pct_lag1", lambda s: s.abs().mean()),
         median_holder_vol=("rh_pct_vol_lag1", "median"),
@@ -2179,7 +2179,7 @@ def _(mo, overview_train, plt):
     )
     _sample = _t.sample(100_000, random_state=0)
     _fig, _ax = plt.subplots(figsize=(7, 5))
-    _hb = _ax.hexbin(_sample["cap_prev"] * 1e3, _sample["holders_close_prev"], xscale="log", yscale="log", gridsize=60, bins="log", mincnt=1)
+    _hb = _ax.hexbin(_sample["cap_prev"] * 1e3, _sample["holders_count_prev"], xscale="log", yscale="log", gridsize=60, bins="log", mincnt=1)
     _ax.set_xlabel("market cap at t-1 ($)")
     _ax.set_ylabel("holders at t-1")
     _ax.set_title("Holders against size (100,000 random stock-days)")
@@ -2208,7 +2208,7 @@ def _(HOLDERS_MIN, PRICE_MIN, SPLIT_DATE, mo, pd, returns_test, returns_train):
     _r = pd.concat([returns_train, returns_test])
     return_checks = pd.DataFrame([
         ("returns: one row per PERMNO and date", not _r.duplicated(["permno", "date"]).any()),
-        ("returns: every row in the 15:50 universe", bool((_r["price_prev"].ge(PRICE_MIN) & _r["holders_close_prev"].ge(HOLDERS_MIN)).all())),
+        ("returns: every row in the 15:50 universe", bool((_r["price_prev"].ge(PRICE_MIN) & _r["holders_count_prev"].ge(HOLDERS_MIN)).all())),
         ("returns: train labels end before the split, test starts on it",
          bool(returns_train["next_day"].max() < SPLIT_DATE <= returns_test["date"].min())),
         ("returns: delisting payoffs flagged", bool((_r["ret_next_is_delisting"] == _r["ret_next_span"].eq("DD").fillna(False)).all())),

@@ -17,7 +17,7 @@ Every input to a return prediction must have been known before the decision. Pos
 - Any setting chosen by looking at the data (holder floors, outlier and winsorizing cutoffs, exclusion windows, target units, model choices) is chosen on the training period only and applied unchanged to the test period. Never tune anything on test-period results.
 - Filters work row by row with what was known at the time: yesterday's holders, not a full-sample median.
 - Fixing how the data was recorded (PERMNO matching, share-class splits, placeholder zeros, repeated readings) is fine on the full sample, because it does not select by value.
-- Robintrack timestamps are retrieval times in UTC, and the counts lag them by about 25 to 40 minutes. A day's close count is the reading taken between 16:40 and 16:59 New York time.
+- Robintrack timestamps are retrieval times in UTC, and the counts lag them by about 25 to 40 minutes. A day's count is the first reading taken between 15:40 and 15:50 New York time, the last one before the cutoff; daily changes run from one trading day's count to the next.
 
 ## Survivorship bias
 

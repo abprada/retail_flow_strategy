@@ -9,9 +9,9 @@ def _(mo):
     mo.md(r"""
     # Robintrack and returns
 
-    Does the change in Robinhood holders, or features of it, predict next-day returns? Only the training return panel is read: `data/intermediate/clean/returns_train.parquet`, one row per stock and day in the universe known at 15:50 (a price of at least $1 and 100+ holders at the previous close), with return labels ending before the 2019-12-12 split. The test file stays closed until every choice made here is frozen; it is opened once, in the backtest at the end.
+    Does the change in Robinhood holders, or features of it, predict next-day returns? Only the training return panel is read: `data/intermediate/clean/returns_train.parquet`, one row per stock and day in the universe known at 15:50 (a price of at least $1 and 100+ holders at the previous day's count), with return labels ending before the 2019-12-12 split. The test file stays closed until every choice made here is frozen; it is opened once, in the backtest at the end.
 
-    Timing: the `*_prev` columns, `holders_close_prev` and the `rh_pct_*_lag1` features are known before the 15:50 cutoff on day t; `ret_next` is the close-to-close return from day t to the next trading day.
+    Timing: the `*_prev` columns, `holders_count_prev` and the `rh_pct_*_lag1` features are known before the 15:50 cutoff on day t; `ret_next` is the close-to-close return from day t to the next trading day.
     """)
     return
 
@@ -48,7 +48,7 @@ def _(mo):
     | vol | `rh_pct_vol60_lag1` | standard deviation of $g$ over the last 60 trading days (at least 30 changes) |
     | sqdev | `rh_pct_sqdev20_lag1` | $(g_{t-1} - \bar g)^2$, with $\bar g$ the mean of $g$ over the 20 trading days before (at least 10 changes): the size of the last change as a surprise against the stock's own drift |
 
-    Vol and sqdev are also built over rolling windows of 5, 10, 20, 40 and 60 trading days (at least half the window); the windows above, 60 days for vol and 20 for sqdev, are the ones the 10-fold cross-validation in the lasso section chose on train. The choice is weak: every window pair scored within one standard error of the best.
+    Vol and sqdev are also built over rolling windows of 5, 10, 20, 40 and 60 trading days (at least half the window); the windows above are 60 days for vol and 20 for sqdev. The 10-fold cross-validation in the lasso section scores every window pair within one standard error of the best, so the choice between them is weak and the windows are kept fixed.
 
     Four more, acceleration, the deviation from the 60-day mean, the 20-day mean and the plain squared change, were dropped; see the graveyard at the bottom.
     """)
@@ -59,11 +59,11 @@ def _(mo):
 def _():
     FEATURES = {
         "level": "rh_pct_lag1",
-        "vol": "rh_pct_vol60_lag1",  # windows chosen by the 10-fold cross-validation in the lasso section
+        "vol": "rh_pct_vol60_lag1",  # windows fixed; the lasso section shows every pair within one standard error
         "sqdev": "rh_pct_sqdev20_lag1",
     }
     X = {_name: f"{_col}_zw" for _name, _col in FEATURES.items()}  # the standardized column each regression uses
-    # candidate rolling windows for vol and sqdev (built in 01), chosen by cross-validation in the lasso section
+    # candidate rolling windows for vol and sqdev (built in 01), compared by cross-validation in the lasso section
     WINDOW_GRID = [5, 10, 20, 40, 60]
     WINDOW_COLUMNS = [f"rh_pct_{_k}{_n}_lag1" for _k in ("vol", "sqdev") for _n in WINDOW_GRID]
     return FEATURES, WINDOW_COLUMNS, WINDOW_GRID, X
@@ -542,12 +542,12 @@ def _(mo):
     mo.md(r"""
     ## Graveyard
 
-    Features tried and dropped, with their train results at the time, in the same universe and units as above (bp per standard deviation).
+    Features tried and dropped, with their train results in the same universe and units as above (bp per standard deviation; HAC t for pooled OLS, Newey-West t for Fama-MacBeth). Here vol and sqdev are the 20-day versions.
 
-    - **accel**, `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$: OLS alone $-0.69$ (HAC t $-1.07$); Fama-MacBeth alone $-0.89$ (Newey-West t $-1.35$). Correlation 0.58 with the level. It only looked useful next to the level, in a lasso on all five features (kept in 82% of bootstrap draws, +0.58, post-lasso t 1.36): the positive sign just says the change two days ago also predicts negatively. Dropped.
-    - **dev**, `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before: OLS alone $-0.74$ (HAC t $-1.19$); Fama-MacBeth alone $-0.82$ (Newey-West t $-1.34$). Correlation 0.82 with the level, so it is mostly the level again; the lasso set it to 0. Dropped.
-    - **mean**, `rh_pct_mean_lag1`, the mean of $g$ over the 20 trading days ending at t-1 (same window as the volatility): OLS alone $-2.51$ (HAC t $-3.47$); Fama-MacBeth alone $-2.48$ (Newey-West t $-3.42$). But its correlation with the volatility is 0.86 after winsorizing and z-scoring: the holder change is right-skewed, so big inflows raise the mean and the spread together. Next to level, sq and vol it turns positive, $+1.52$ (HAC t $1.27$) in pooled OLS and $+1.43$ (Newey-West t $1.13$) in Fama-MacBeth, while the volatility gets stronger. It adds nothing beyond the volatility. Dropped.
-    - **sq**, `rh_pct_sq_lag1` $= g_{t-1}^2$: OLS alone $-3.84$ (HAC t $-4.32$); Fama-MacBeth alone $-3.78$ (Newey-West t $-4.35$). With level and vol: $-1.42$ (HAC t $-1.51$) in pooled OLS, $-1.66$ (Newey-West t $-1.69$) in Fama-MacBeth. Replaced by sqdev, the squared deviation from the 20-day mean: correlation 0.75, and head to head on the same rows sq falls to $-1.12$ (HAC t $-0.93$) while sqdev keeps $-2.57$ (HAC t $-3.04$). The size of a change measured against the stock's own drift is the cleaner surprise. Dropped.
+    - **accel**, `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$: OLS alone $-1.15$ (t $-1.79$); Fama-MacBeth alone $-1.08$ (t $-1.68$). Correlation 0.55 with the level, and next to the level it is $+0.62$ (t $0.70$): nothing beyond the level. Dropped.
+    - **dev**, `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before: OLS alone $-1.13$ (t $-1.65$); Fama-MacBeth alone $-1.56$ (t $-2.05$). Correlation 0.82 with the level, so it is mostly the level again. Dropped.
+    - **mean**, `rh_pct_mean_lag1`, the mean of $g$ over the 20 trading days ending at t-1 (same window as the volatility): OLS alone $-2.25$ (t $-3.07$); Fama-MacBeth alone $-2.42$ (t $-3.03$). But its correlation with the volatility is 0.86 after winsorizing and z-scoring: the holder change is right-skewed, so big inflows raise the mean and the spread together. Next to level, sq and vol it turns positive in pooled OLS, $+2.12$ (t $1.80$), while the volatility gets stronger, $-4.07$ (t $-3.35$). It adds nothing beyond the volatility. Dropped.
+    - **sq**, `rh_pct_sq_lag1` $= g_{t-1}^2$: OLS alone $-3.86$ (t $-4.22$); Fama-MacBeth alone $-3.72$ (t $-4.14$). With level and vol: $-1.48$ (t $-1.42$) in pooled OLS, $-2.14$ (t $-1.99$) in Fama-MacBeth. Replaced by sqdev, the squared deviation from the 20-day mean: correlation 0.75, and head to head next to the level, sq falls to $-0.57$ (t $-0.38$) while sqdev keeps $-2.35$ (t $-2.03$). The size of a change measured against the stock's own drift is the cleaner surprise. Dropped.
 
     All four are still built in `01_clean_explore_robintrack.py` and written to the return panel.
     """)
