@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Robintrack and returns
 
-    Does the change in Robinhood holders, or features of it, predict next-day returns? Only the training return panel is read here: `data/intermediate/clean/returns_train.parquet`, one row per stock and day in the universe known at 15:50 (a price of at least $1 and 100+ holders at the previous close), with return labels ending before the 2019-12-12 split. The test file stays closed until every choice made here is frozen.
+    Does the change in Robinhood holders, or features of it, predict next-day returns? Only the training return panel is read here: `data/intermediate/clean/returns_train.parquet`, one row per stock and day in the universe known at 15:50 (a price of at least $1 and 100+ holders at the previous close), with return labels ending before the 2019-12-12 split. The universe is narrowed to operating companies, and X and y are standardized each day, in the next section. The test file stays closed until every choice made here is frozen.
 
     Timing reminder: the `*_prev` columns, `holders_close_prev` and `rh_pct_lag1*` are known before the 15:50 cutoff on day t; the `rh_pct_t*` columns only after the close; `ret_next` is the close-to-close return from day t to the next trading day.
     """)
@@ -32,16 +32,51 @@ def _():
 @app.cell
 def _(mo, pd):
     PANEL_TRAIN_PATH = mo.notebook_dir().parent / "data" / "intermediate" / "clean" / "returns_train.parquet"
-    panel = pd.read_parquet(PANEL_TRAIN_PATH)
-    return (panel,)
+    panel_raw = pd.read_parquet(PANEL_TRAIN_PATH)
+    return (panel_raw,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Universe and standardization
+
+    The panel from 01 holds raw values only, because the right demeaning and scaling depends on which stocks are in the universe. Both happen here, each day within the universe:
+
+    - **Universe:** the 15:50 universe from 01, restricted to operating companies by CRSP's classification on day t: US common stock, foreign common stock and ADRs. ETFs, closed-end funds, REITs and units are dropped.
+    - **X:** each holder-change feature is winsorized at that day's 1st and 99th percentiles, then z-scored with that day's mean and standard deviation (`_zw`).
+    - **y:** `ret_next_dm`, the next-day return minus the universe's mean that day.
+
+    Every step uses only the row's own day, so nothing crosses days or the split.
+    """)
+    return
 
 
 @app.cell
-def _(mo, panel):
-    _cols = ["permno", "date", "holders_close_prev", "rh_pct_lag1", "rh_pct_lag1_dm", "rh_pct_lag1_wdm", "ret_next", "ret_next_dm", "ret_next_is_delisting", "price_prev", "cap_prev"]
+def _(panel_raw):
+    UNIVERSE_TYPES = ["common stock", "foreign common stock", "ADR"]
+    WINSOR_QUANTILES = (0.01, 0.99)
+    RAW_FEATURES = ["rh_pct_lag1", "rh_pct_accel_lag1", "rh_pct_sq_lag1", "rh_pct_vol_lag1", "rh_pct_dev_lag1"]
+
+    _p = panel_raw[panel_raw["security_type"].isin(UNIVERSE_TYPES)].copy()
+    _day = _p["date"]
+    for _f in RAW_FEATURES:
+        _q = _p[_f].groupby(_day).quantile(list(WINSOR_QUANTILES)).unstack()
+        _w = _p[_f].clip(_day.map(_q[WINSOR_QUANTILES[0]]), _day.map(_q[WINSOR_QUANTILES[1]]))
+        _p[f"{_f}_zw"] = (_w - _w.groupby(_day).transform("mean")) / _w.groupby(_day).transform("std")
+    _p["ret_next_dm"] = _p["ret_next"] - _p["ret_next"].groupby(_day).transform("mean")
+    panel = _p.reset_index(drop=True)
+    return UNIVERSE_TYPES, panel
+
+
+@app.cell
+def _(UNIVERSE_TYPES, mo, panel, panel_raw):
+    _cols = ["permno", "date", "security_type", "holders_close_prev", "rh_pct_lag1", "rh_pct_lag1_zw", "ret_next", "ret_next_dm", "ret_next_is_delisting", "price_prev", "cap_prev"]
     _mid = len(panel) // 2
     mo.vstack([
-        mo.md(f"**Loaded:** {len(panel):,} stock-days in the 15:50 universe, {panel['permno'].nunique():,} PERMNOs, {panel['date'].min():%Y-%m-%d} to {panel['date'].max():%Y-%m-%d}, {panel.shape[1]} columns"),
+        mo.md(f"**Loaded:** {len(panel_raw):,} stock-days in the 15:50 universe. **Kept** ({', '.join(UNIVERSE_TYPES)}): {len(panel):,} stock-days ({len(panel) / len(panel_raw):.0%}), {panel['permno'].nunique():,} PERMNOs, {panel['date'].min():%Y-%m-%d} to {panel['date'].max():%Y-%m-%d}, {panel.shape[1]} columns"),
+        mo.ui.table(panel_raw["security_type"].value_counts().rename_axis("security_type").reset_index(name="stock-days")
+                    .assign(kept=lambda d: d["security_type"].isin(UNIVERSE_TYPES)), selection=None),
         mo.md("100 rows from the middle of the panel:"),
         mo.ui.table(panel[_cols].iloc[_mid - 50:_mid + 50]),
     ])
@@ -73,7 +108,7 @@ def _(mo, panel, pd, plt):
         _ax.set_title(_c, fontsize=9)
     _fig.tight_layout()
     mo.vstack([
-        mo.md("**The regression sample** (rows with both values). X is the z-score of the winsorized values within the 15:50 universe each day (`_zw`). " + "; ".join(f"`{k}`: {v}" for k, v in _versions.items())),
+        mo.md("**The regression sample** (rows with both values). X is the z-score of the winsorized values within the universe each day (`_zw`). " + "; ".join(f"`{k}`: {v}" for k, v in _versions.items())),
         mo.ui.table(_summary.reset_index(names="statistic").round(6), selection=None, page_size=20),
         _fig,
     ])
@@ -89,7 +124,7 @@ def _(mo):
 
     `rh_pct_lag1_zw`: % change, $h_{t-1}/h_{t-2} - 1$
 
-    X is winsorized at that day's 1st and 99th percentiles within the 15:50 universe, then z-scored with that day's mean and standard deviation, so $\beta$ is the next-day return for a one-standard-deviation move. y is `ret_next_dm`, the next-day return minus the universe's mean that day. Standard errors are Driscoll-Kraay HAC (statsmodels' `hac-groupsum`, 5 lags): robust to correlation across stocks on the same day and to autocorrelation over days.
+    X is winsorized at that day's 1st and 99th percentiles within the universe, then z-scored with that day's mean and standard deviation, so $\beta$ is the next-day return for a one-standard-deviation move. y is `ret_next_dm`, the next-day return minus the universe's mean that day. Standard errors are Driscoll-Kraay HAC (statsmodels' `hac-groupsum`, 5 lags): robust to correlation across stocks on the same day and to autocorrelation over days.
     """)
     return
 
@@ -131,7 +166,7 @@ def _(mo):
     3. `rh_pct_vol_lag1`: volatility, the standard deviation of $g$ over the last 20 trading days (at least 10 changes)
     4. `rh_pct_dev_lag1`: deviation from the long-run mean, $g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes)
 
-    Each is used as `_zw`, like `rh_pct_lag1_zw`: winsorized at the day's 1st and 99th percentiles within the 15:50 universe, then z-scored that day. The matrix is the pooled Pearson correlation on rows with all five values.
+    Each is used as `_zw`, like `rh_pct_lag1_zw`: winsorized at the day's 1st and 99th percentiles within the universe, then z-scored that day (see the universe section). The matrix is the pooled Pearson correlation on rows with all five values.
     """)
     return
 
@@ -334,6 +369,44 @@ def _(
         mo.md(f"**{len(_d):,} stock-days on {_n_days:,} days; {LASSO_BOOT_DRAWS} bootstrap draws of {LASSO_BOOT_BLOCK}-day blocks; lambda {LASSO_LAMBDA:.2e}**"),
         mo.ui.table(lasso_inference.round(4), selection=None),
         mo.plain_text(post_lasso_fit.summary().as_text()),
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Fama-MacBeth
+
+    Each training day, a cross-sectional OLS of `ret_next_dm` on three features: level, squared change and volatility, all `_zw`. Acceleration and the deviation from the 60-day mean are left out. The daily slopes are then averaged over days. The t-stat is the mean slope over its standard error across days: plain (Fama-MacBeth) and Newey-West with 5 lags (the daily slopes can be autocorrelated). The average daily slope is the daily return of a long-short portfolio with unit exposure to that feature and zero to the others.
+    """)
+    return
+
+
+@app.cell
+def _(HAC_LAGS, mo, np, panel, pd, sm):
+    FM_FEATURES = ["rh_pct_lag1_zw", "rh_pct_sq_lag1_zw", "rh_pct_vol_lag1_zw"]
+
+    _d = panel[["date", "ret_next_dm", *FM_FEATURES]].dropna().sort_values("date")
+    _rows = []
+    for _day, _g in _d.groupby("date"):
+        _X = np.column_stack([np.ones(len(_g)), _g[FM_FEATURES].to_numpy()])
+        _b, *_ = np.linalg.lstsq(_X, _g["ret_next_dm"].to_numpy(), rcond=None)
+        _resid = _g["ret_next_dm"].to_numpy() - _X @ _b
+        _r2 = 1 - (_resid**2).sum() / ((_g["ret_next_dm"] - _g["ret_next_dm"].mean()) ** 2).sum()
+        _rows.append({"date": _day, "n": len(_g), "r_squared": _r2, **dict(zip(["const", *FM_FEATURES], _b))})
+    fm_slopes = pd.DataFrame(_rows).set_index("date")
+
+
+    def _fm_row(s):
+        _nw = sm.OLS(s.to_numpy(), np.ones(len(s))).fit(cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS})
+        return {"mean_slope_bp": s.mean() * 1e4, "fm_t": s.mean() / (s.std() / np.sqrt(len(s))), "nw_t": _nw.tvalues[0], "share_days_negative": (s < 0).mean()}
+
+
+    fm_results = pd.DataFrame([{"X": _x, **_fm_row(fm_slopes[_x])} for _x in ["const", *FM_FEATURES]])
+    mo.vstack([
+        mo.md(f"**{len(fm_slopes):,} days, {int(fm_slopes['n'].median()):,} stocks on the median day, average cross-sectional R2 {fm_slopes['r_squared'].mean():.2%}**"),
+        mo.ui.table(fm_results.round(4), selection=None),
     ])
     return
 

@@ -27,3 +27,6 @@ data/intermediate/*
 # Literature review
 literature/
 
+
+# CodeGraph index
+.codegraph/

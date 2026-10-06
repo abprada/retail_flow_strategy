@@ -1395,13 +1395,13 @@ def _(mo):
     Two panels come out of this notebook. The **holder panel** (Model 1) needs day t's close count, because its label is day t's change. The **return panel** (the return tests in 02) must not: the decision is made at 15:50 on day t, so which stocks are in it can only use what was known then.
 
     - **Rows:** every stock and trading day t in the **15:50 universe**: a CRSP price of at least $1 and at least 100 Robinhood holders at day t-1's close. A stock stays in even if day t's close reading is missing or a break follows.
-    - **X, known by 15:50 on day t:** `rh_pct_lag1`, the % change in holders on day t-1 (from T2; missing if day t-1 had no usable change). `_dm` is demeaned within the universe each day; `_wdm` is clipped at that day's 1st and 99th percentiles within the universe, then demeaned. Two standardized versions: `_zw` is the z-score of the winsorized values (clip at the day's 1st and 99th percentiles, then subtract the day's mean and divide by its standard deviation); `_wz` is the winsorized z-score (z-score with the day's raw mean and standard deviation, then clip at the day's 1st and 99th percentiles of the z-scores).
-    - **Features of the holder-change history, known by 15:50 on day t** (built on each PERMNO's whole daily history, all ending at day t-1's change $g_{t-1}$): `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$; `rh_pct_sq_lag1` $= g_{t-1}^2$; `rh_pct_vol_lag1`, the standard deviation of $g$ over the last 20 trading days (at least 10 changes); `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes). Each has a `_zw` version built like `rh_pct_lag1_zw`.
-    - **Upper bound only, known after day t's close:** `rh_pct_t` and its `_dm` and `_wdm` versions, missing when day t has no usable change.
-    - **y:** `ret_next`, CRSP's total return from day t's close to the next trading day's close, and `ret_next_dm`, demeaned within the universe. Kept when CRSP's return covers one trading day (D1 to D4, DU) or is a delisting payoff (DD). A delisting payoff can span more than a day, so those rows carry `ret_next_is_delisting`.
-    - **Also:** `ret_prev`, `price_prev`, `cap_prev`, `dollar_volume_prev` (day t-1) and `is_common` (day t).
+    - **X, known by 15:50 on day t:** `rh_pct_lag1`, the % change in holders on day t-1 (from T2; missing if day t-1 had no usable change).
+    - **Features of the holder-change history, known by 15:50 on day t** (built on each PERMNO's whole daily history, all ending at day t-1's change $g_{t-1}$): `rh_pct_accel_lag1` $= g_{t-1} - g_{t-2}$; `rh_pct_sq_lag1` $= g_{t-1}^2$; `rh_pct_vol_lag1`, the standard deviation of $g$ over the last 20 trading days (at least 10 changes); `rh_pct_dev_lag1` $= g_{t-1}$ minus its mean over the 60 trading days before (at least 30 changes).
+    - **Upper bound only, known after day t's close:** `rh_pct_t`, day t's own change, missing when day t has no usable change.
+    - **y:** `ret_next`, CRSP's total return from day t's close to the next trading day's close. Kept when CRSP's return covers one trading day (D1 to D4, DU) or is a delisting payoff (DD). A delisting payoff can span more than a day, so those rows carry `ret_next_is_delisting`.
+    - **Also:** `ret_prev`, `price_prev`, `cap_prev`, `dollar_volume_prev` (day t-1), and `is_common` and `security_type` (day t): CRSP's classification into common stock, foreign common stock, ADR, REIT, ETF, closed-end fund, unit or other.
+    - **Not here:** demeaning, winsorizing and z-scores. They depend on which stocks are in the universe, so `02_robintrack_returns.py` does them each day within the universe it picks.
     """)
-
     return
 
 
@@ -1445,6 +1445,7 @@ def _(
     TRADING_DAYS,
     crsp_daily,
     holder_change_features,
+    np,
     pd,
     t1_close,
     t2_change,
@@ -1489,35 +1490,26 @@ def _(
         _cls["securitytype"].eq("EQTY") & _cls["securitysubtype"].eq("COM") & _cls["sharetype"].eq("NS")
         & _cls["usincflg"].eq("Y") & _cls["issuertype"].eq("CORP")
     ).fillna(False).astype(bool)
+    # security type from the same classification, for choosing a universe later
+    _is_com = _cls["securitytype"].eq("EQTY") & _cls["securitysubtype"].eq("COM")
+    _r["security_type"] = np.select(
+        [
+            _is_com & _cls["issuertype"].eq("REIT"),
+            _is_com & _cls["sharetype"].eq("UG"),
+            _is_com & _cls["sharetype"].eq("AD") & _cls["issuertype"].eq("CORP"),
+            _is_com & _cls["sharetype"].eq("NS") & _cls["issuertype"].eq("CORP") & _cls["usincflg"].eq("Y"),
+            _is_com & _cls["sharetype"].eq("NS") & _cls["issuertype"].eq("CORP") & _cls["usincflg"].eq("N"),
+            _cls["securitytype"].eq("FUND") & _cls["securitysubtype"].eq("ETF"),
+            _cls["securitytype"].eq("FUND") & _cls["securitysubtype"].eq("CEF"),
+            _cls["securitytype"].isna(),
+        ],
+        ["REIT", "unit", "ADR", "common stock", "foreign common stock", "ETF", "closed-end fund", "unclassified"],
+        default="other",
+    )
 
-    # demeaned, and winsorized at the day's 1st and 99th percentiles then demeaned, within the universe on day t
-    _day = _r["date"]
-    for _f in ("rh_pct_lag1", "rh_pct_t"):
-        _v = _r[_f]
-        _r[f"{_f}_dm"] = _v - _v.groupby(_day).transform("mean")
-        _q = _v.groupby(_day).quantile([0.01, 0.99]).unstack()
-        _w = _v.clip(_day.map(_q[0.01]), _day.map(_q[0.99]))
-        _r[f"{_f}_wdm"] = _w - _w.groupby(_day).transform("mean")
-    # two standardized versions of X, each within the universe on day t
-    _v = _r["rh_pct_lag1"]
-    _q = _v.groupby(_day).quantile([0.01, 0.99]).unstack()
-    _w = _v.clip(_day.map(_q[0.01]), _day.map(_q[0.99]))
-    _r["rh_pct_lag1_zw"] = (_w - _w.groupby(_day).transform("mean")) / _w.groupby(_day).transform("std")  # z-score of the winsorized values
-    # the features of the holder-change history, each as the z-score of its winsorized values
-    for _f in HOLDER_CHANGE_FEATURES:
-        _qf = _r[_f].groupby(_day).quantile([0.01, 0.99]).unstack()
-        _wf = _r[_f].clip(_day.map(_qf[0.01]), _day.map(_qf[0.99]))
-        _r[f"{_f}_zw"] = (_wf - _wf.groupby(_day).transform("mean")) / _wf.groupby(_day).transform("std")
-    _z = (_v - _v.groupby(_day).transform("mean")) / _v.groupby(_day).transform("std")
-    _qz = _z.groupby(_day).quantile([0.01, 0.99]).unstack()
-    _r["rh_pct_lag1_wz"] = _z.clip(_day.map(_qz[0.01]), _day.map(_qz[0.99]))  # winsorized z-scores
-    _r["ret_next_dm"] = _r["ret_next"] - _r.groupby("date")["ret_next"].transform("mean")
     returns_panel = _r.sort_values(["permno", "date"]).reset_index(drop=True)
-    FEATURES_AT_1550 = [
-        "rh_pct_lag1", "rh_pct_lag1_dm", "rh_pct_lag1_wdm", "rh_pct_lag1_zw", "rh_pct_lag1_wz",
-        *HOLDER_CHANGE_FEATURES, *(f"{_f}_zw" for _f in HOLDER_CHANGE_FEATURES),
-    ]
-    FEATURES_AFTER_CLOSE = ["rh_pct_t", "rh_pct_t_dm", "rh_pct_t_wdm"]
+    FEATURES_AT_1550 = ["rh_pct_lag1", *HOLDER_CHANGE_FEATURES]
+    FEATURES_AFTER_CLOSE = ["rh_pct_t"]
 
     return FEATURES_AFTER_CLOSE, FEATURES_AT_1550, returns_panel
 
@@ -1533,8 +1525,8 @@ def _(
 ):
     _tr = returns_panel[returns_panel["date"] < SPLIT_DATE]
     _cov = pd.DataFrame({
-        "column": FEATURES_AT_1550 + FEATURES_AFTER_CLOSE + ["ret_next", "ret_next_dm"],
-        "known": ["by 15:50 on day t"] * len(FEATURES_AT_1550) + ["after day t's close"] * len(FEATURES_AFTER_CLOSE) + ["after the next close"] * 2,
+        "column": FEATURES_AT_1550 + FEATURES_AFTER_CLOSE + ["ret_next"],
+        "known": ["by 15:50 on day t"] * len(FEATURES_AT_1550) + ["after day t's close"] * len(FEATURES_AFTER_CLOSE) + ["after the next close"],
     })
     _cov["share_available_on_train"] = [round(float(_tr[c].notna().mean()), 3) for c in _cov["column"]]
     mo.vstack([
@@ -1860,6 +1852,211 @@ def _(mo, panel_train_out, plt):
 @app.cell
 def _(mo):
     mo.md(r"""
+    ## The train return panel before modelling
+
+    What `returns_train` looks like, the rows `02_robintrack_returns.py` reads: every stock-day in the 15:50 universe on train. Nothing here changes the data.
+
+    - **Holders:** `holders_close_prev`, the count at day t-1's close.
+    - **Holder change:** `rh_pct_lag1`, the % change into day t-1's close, plus its 20-day volatility and squared value.
+    - **Market data at t-1:** price, market cap, dollar volume, turnover (dollar volume / market cap) and the day's return `ret_prev`.
+    - **Target:** `ret_next`, the return from day t's close to the next.
+    """)
+    return
+
+
+@app.cell
+def _(pd, returns_train):
+    OVERVIEW_COLUMNS = {
+        "holders_close_prev": "holders at t-1",
+        "rh_pct_lag1": "holder % change, t-1",
+        "rh_pct_vol_lag1": "holder % change volatility, 20d",
+        "rh_pct_sq_lag1": "holder % change squared",
+        "rh_pct_accel_lag1": "holder % change acceleration",
+        "rh_pct_dev_lag1": "holder % change minus its 60d mean",
+        "price_prev": "price at t-1",
+        "cap_prev": "market cap at t-1 ($ thousands)",
+        "dollar_volume_prev": "dollar volume at t-1",
+        "turnover_prev": "turnover at t-1",
+        "ret_prev": "return on t-1",
+        "ret_next": "return, close t to t+1",
+    }
+    # CRSP market cap is in $ thousands, dollar volume in $
+    overview_train = returns_train.assign(turnover_prev=returns_train["dollar_volume_prev"] / (returns_train["cap_prev"] * 1e3))
+
+
+    def _describe(s):
+        q = s.quantile([0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99])
+        return {
+            "missing": s.isna().mean(),
+            "mean": s.mean(),
+            "std": s.std(),
+            "skew": s.skew(),
+            "excess_kurtosis": s.kurt(),
+            "min": s.min(),
+            **{f"p{100 * k:g}": v for k, v in q.items()},
+            "max": s.max(),
+        }
+
+
+    overview_stats = pd.DataFrame({_label: _describe(overview_train[_c]) for _c, _label in OVERVIEW_COLUMNS.items()}).T
+
+    # one row per stock: how long it is in the universe and what it typically looks like
+    overview_per_stock = overview_train.groupby("permno").agg(
+        days=("date", "size"),
+        first_day=("date", "min"),
+        last_day=("date", "max"),
+        median_holders=("holders_close_prev", "median"),
+        median_cap=("cap_prev", "median"),
+        median_dollar_volume=("dollar_volume_prev", "median"),
+        median_price=("price_prev", "median"),
+        mean_holder_pct_change=("rh_pct_lag1", "mean"),
+        holder_pct_change_std=("rh_pct_lag1", "std"),
+        mean_ret_next=("ret_next", "mean"),
+        ret_next_std=("ret_next", "std"),
+        share_common=("is_common", "mean"),
+    )
+    overview_per_day = overview_train.groupby("date").agg(
+        stocks=("permno", "size"),
+        median_holders=("holders_close_prev", "median"),
+        total_holders=("holders_close_prev", "sum"),
+        holder_pct_change_p10=("rh_pct_lag1", lambda s: s.quantile(0.1)),
+        holder_pct_change_p50=("rh_pct_lag1", "median"),
+        holder_pct_change_p90=("rh_pct_lag1", lambda s: s.quantile(0.9)),
+        ret_next_mean=("ret_next", "mean"),
+        ret_next_xs_std=("ret_next", "std"),
+        holder_pct_change_xs_std=("rh_pct_lag1", "std"),
+        share_common=("is_common", "mean"),
+        delistings=("ret_next_is_delisting", "sum"),
+    )
+    return (
+        OVERVIEW_COLUMNS,
+        overview_per_day,
+        overview_per_stock,
+        overview_stats,
+        overview_train,
+    )
+
+
+@app.cell
+def _(
+    OVERVIEW_COLUMNS,
+    mo,
+    overview_per_day,
+    overview_per_stock,
+    overview_stats,
+    overview_train,
+):
+    _ps = overview_per_stock
+    _days = overview_per_day["stocks"]
+    _rank_cols = ["holders_close_prev", "cap_prev", "dollar_volume_prev", "turnover_prev", "price_prev",
+                  "rh_pct_lag1", "rh_pct_vol_lag1", "ret_prev", "ret_next"]
+    _spearman = overview_train[_rank_cols].sample(200_000, random_state=0).corr(method="spearman").rename(
+        index=OVERVIEW_COLUMNS, columns=OVERVIEW_COLUMNS)
+    mo.vstack([
+        mo.md(f"""
+    **Train return panel:** {len(overview_train):,} stock-days, {overview_train["permno"].nunique():,} PERMNOs, {len(_days):,} days ({overview_train["date"].min():%Y-%m-%d} to {overview_train["date"].max():%Y-%m-%d}).
+
+    - **Stocks per day:** median {int(_days.median()):,}, from {_days.min():,} ({_days.idxmin():%Y-%m-%d}) to {_days.max():,} ({_days.idxmax():%Y-%m-%d}).
+    - **Days per stock:** median {int(_ps["days"].median())} of {len(_days)}; {(_ps["days"] == len(_days)).mean():.0%} of PERMNOs are in every day, {(_ps["days"] < 20).mean():.0%} for fewer than 20.
+    - **Common stock (share codes 10/11):** {overview_train["is_common"].mean():.1%} of rows. **Delisting payoffs:** {int(overview_train["ret_next_is_delisting"].sum()):,} rows.
+    - **Holders are concentrated:** the top 1% of stocks by median holders hold {_ps["median_holders"].nlargest(int(len(_ps) * 0.01)).sum() / _ps["median_holders"].sum():.0%} of all holdings.
+    """),
+        mo.md("**Pooled over stock-days** (raw units: % changes and returns as fractions; missing is a share of rows)"),
+        mo.ui.table(overview_stats.reset_index(names="variable").round(6), selection=None, page_size=20),
+        mo.md("**Across stocks** (one row per PERMNO, then summarized)"),
+        mo.ui.table(_ps.drop(columns=["first_day", "last_day"]).describe(percentiles=[0.01, 0.25, 0.5, 0.75, 0.99]).T
+                    .reset_index(names="per-stock statistic").round(6), selection=None, page_size=20),
+        mo.md("**Rank correlations, pooled** (Spearman, 200,000 random stock-days)"),
+        mo.ui.table(_spearman.round(2).reset_index(names="variable"), selection=None, page_size=20),
+    ])
+    return
+
+
+@app.cell
+def _(OVERVIEW_COLUMNS, np, overview_train, plt):
+    _fig, _axes = plt.subplots(3, 4, figsize=(16, 10))
+    _log_vars = ["holders_close_prev", "price_prev", "cap_prev", "dollar_volume_prev", "turnover_prev", "rh_pct_vol_lag1"]
+    _mid_vars = ["rh_pct_lag1", "rh_pct_accel_lag1", "rh_pct_dev_lag1", "rh_pct_sq_lag1", "ret_prev", "ret_next"]
+    for _ax, _c in zip(_axes.flat[:6], _log_vars):
+        _s = overview_train[_c].dropna()
+        _s = _s[_s > 0]
+        _ax.hist(_s, bins=np.geomspace(_s.min(), _s.max(), 120))
+        _ax.set_xscale("log")
+        _ax.set_title(f"{OVERVIEW_COLUMNS[_c]} (log scale)")
+    for _ax, _c in zip(_axes.flat[6:], _mid_vars):
+        _s = overview_train[_c].dropna()
+        _lo, _hi = _s.quantile([0.005, 0.995])
+        _ax.hist(_s[_s.between(_lo, _hi)], bins=150)
+        _ax.set_title(f"{OVERVIEW_COLUMNS[_c]}: middle 99%")
+    for _ax in _axes.flat:
+        _ax.set_ylabel("stock-days")
+    _fig.suptitle("Train return panel: distributions")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(overview_per_day, plt):
+    _d = overview_per_day
+    _fig, _axes = plt.subplots(3, 2, figsize=(16, 10), sharex=True)
+    _axes[0, 0].plot(_d.index, _d["stocks"])
+    _axes[0, 0].set_title("Stocks in the 15:50 universe")
+    _axes[0, 1].plot(_d.index, _d["total_holders"] / 1e6, label="total")
+    _axes[0, 1].set_title("Robinhood holdings across the universe at t-1 (millions)")
+    _axes[1, 0].fill_between(_d.index, _d["holder_pct_change_p10"], _d["holder_pct_change_p90"], alpha=0.3, label="p10 to p90")
+    _axes[1, 0].plot(_d.index, _d["holder_pct_change_p50"], label="median")
+    _axes[1, 0].set_title("Holder % change at t-1, across stocks")
+    _axes[1, 0].legend()
+    _axes[1, 1].plot(_d.index, _d["holder_pct_change_xs_std"])
+    _axes[1, 1].set_yscale("log")
+    _axes[1, 1].set_title("Cross-sectional std of the holder % change (log scale)")
+    _axes[2, 0].bar(_d.index, _d["ret_next_mean"], width=1.5)
+    _axes[2, 0].set_title("Universe mean of ret_next (what demeaning removes)")
+    _axes[2, 1].plot(_d.index, _d["ret_next_xs_std"])
+    _axes[2, 1].set_title("Cross-sectional std of ret_next")
+    for _ax in _axes[1:, :].flat:
+        _ax.axhline(0, color="grey", lw=0.5)
+    _fig.suptitle("Train return panel over time (by day t)")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(mo, overview_train, plt):
+    # who owns what: holders and the holder change against size, by market-cap decile within each day
+    _t = overview_train[["date", "cap_prev", "holders_close_prev", "rh_pct_lag1", "rh_pct_vol_lag1", "ret_next", "turnover_prev"]].dropna(subset=["cap_prev"])
+    _t = _t.assign(cap_decile=_t.groupby("date")["cap_prev"].rank(pct=True).mul(10).clip(upper=9.999).astype(int) + 1)
+    overview_by_size = _t.groupby("cap_decile").agg(
+        stock_days=("date", "size"),
+        median_cap_musd=("cap_prev", lambda s: s.median() / 1e3),
+        median_holders=("holders_close_prev", "median"),
+        median_holder_pct_change=("rh_pct_lag1", "median"),
+        holder_pct_change_abs_mean=("rh_pct_lag1", lambda s: s.abs().mean()),
+        median_holder_vol=("rh_pct_vol_lag1", "median"),
+        median_turnover=("turnover_prev", "median"),
+        ret_next_std=("ret_next", "std"),
+    )
+    _sample = _t.sample(100_000, random_state=0)
+    _fig, _ax = plt.subplots(figsize=(7, 5))
+    _hb = _ax.hexbin(_sample["cap_prev"] * 1e3, _sample["holders_close_prev"], xscale="log", yscale="log", gridsize=60, bins="log", mincnt=1)
+    _ax.set_xlabel("market cap at t-1 ($)")
+    _ax.set_ylabel("holders at t-1")
+    _ax.set_title("Holders against size (100,000 random stock-days)")
+    _fig.colorbar(_hb, label="stock-days (log)")
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md("**By market-cap decile within each day** (1 = smallest). Market cap in $ millions."),
+        mo.ui.table(overview_by_size.reset_index().round(5), selection=None),
+        _fig,
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## Write the panels
 
     Four files: `holders_train` and `holders_test` (Model 1: `in_target` rows with the target) and `returns_train` and `returns_test` (the 15:50 universe, for the return tests). Train and test are separate files, so later work can read the training files without ever opening the test ones. Written only when every check passes and the button is pressed.
@@ -1899,7 +2096,6 @@ def _(
         ("returns: every row in the 15:50 universe", bool((_r["price_prev"].ge(PRICE_MIN) & _r["holders_close_prev"].ge(HOLDERS_MIN)).all())),
         ("returns: train labels end before the split, test starts on it",
          bool(returns_train["next_day"].max() < SPLIT_DATE <= returns_test["date"].min())),
-        ("returns: X demeaned within each day", bool(_r.groupby("date")["rh_pct_lag1_dm"].mean().abs().max() < 1e-12)),
         ("returns: delisting payoffs flagged", bool((_r["ret_next_is_delisting"] == _r["ret_next_span"].eq("DD").fillna(False)).all())),
     ]
     panel_checks = pd.DataFrame(_checks, columns=["check", "passed"])
@@ -1984,6 +2180,16 @@ def _(
         mo.ui.table(pre_write_checks),
     ])
     return (pre_write_checks,)
+
+
+@app.cell
+def _(mo, returns_train):
+    _mid = len(returns_train) // 2
+    mo.vstack([
+        mo.md(f"**The train return panel as written:** 100 rows from the middle, all {returns_train.shape[1]} columns"),
+        mo.ui.table(returns_train.iloc[_mid - 50:_mid + 50], selection=None, page_size=25),
+    ])
+    return
 
 
 if __name__ == "__main__":
