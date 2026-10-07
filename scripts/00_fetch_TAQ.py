@@ -17,6 +17,8 @@ Outputs (gitignored), in data/raw/taq/<date>/:
     row_counts.csv            rows per table
     wct.parquet               trades with their prevailing NBBO, all columns
     mastm.parquet             the master file, all columns
+    ctm_corrections.parquet   the trade file's rows with tr_corr other than 00 (corrected, cancelled, erroneous trades
+                              and their records), all columns; WCT has no tr_corr, so these mark the rows to remove
 """
 
 import csv
@@ -103,8 +105,12 @@ def main() -> None:
             print(f"downloading taqmsec.{table}_{YMD}", flush=True)
             query_to_parquet(conn, f"SELECT {', '.join(columns)} FROM taqmsec.{table}_{YMD}", columns,
                              OUT / f"{table}.parquet")
+        ctm_columns = columns_of(conn, "ctm")
+        print(f"downloading the rows of taqmsec.ctm_{YMD} with tr_corr other than 00", flush=True)
+        query_to_parquet(conn, f"SELECT {', '.join(ctm_columns)} FROM taqmsec.ctm_{YMD} WHERE tr_corr <> '00'", ctm_columns,
+                         OUT / "ctm_corrections.parquet")
 
-    for table in TABLES:
+    for table in [*TABLES, "ctm_corrections"]:
         path = OUT / f"{table}.parquet"
         print(f"{path.relative_to(ROOT)}: {pq.ParquetFile(path).metadata.num_rows:,} rows, "
               f"{path.stat().st_size / 1e6:,.0f} MB")

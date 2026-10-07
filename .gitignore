@@ -30,3 +30,6 @@ literature/
 
 # CodeGraph index
 .codegraph/
+
+# Explanations (kept local)
+explanations/
