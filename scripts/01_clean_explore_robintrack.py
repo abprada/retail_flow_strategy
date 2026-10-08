@@ -1271,9 +1271,43 @@ def _(TRADING_DAYS, mo, plt, t1_count, t1_summary):
 @app.cell
 def _(mo):
     mo.md(r"""
+    ## T2a: delivery days (merger acquirers and spin-offs)
+
+    Two corporate events move holder counts without anyone trading:
+
+    - **Stock merger, the acquirer:** the target's holders are converted into the acquirer's. On train its holders rise roughly one for one with the target's last count over the following days.
+    - **Spin-off, the new company:** its shares are handed to the parent's holders.
+
+    These are the CRSP events where this stock is the **counterparty**: another stock's holders received its shares. Trading days 0 to 5 from the event date are marked as delivery days and get no daily change in T2, so they are in neither Model 1's target nor the holder features. The event date is known only afterwards. That is fine here, because the marking only removes rows from a label and its history; it is never an input. The spin-off parent is kept: its holders rising with its price drop is buying.
+    """)
+    return
+
+
+@app.cell
+def _(TRADING_DAYS, corporate_events, np, pd):
+    DELIVERY_DAYS = 5  # trading days after the event, inclusive of day 0
+
+    _ev = corporate_events[corporate_events["kind"].isin(["merger", "spin-off"]) & corporate_events["affected_as"].eq("counterparty")]
+    _start = TRADING_DAYS.searchsorted(_ev["event_date"])  # first trading day on or after the event
+    delivery_days = pd.DataFrame({
+        "permno": np.repeat(_ev["permno"].to_numpy(), DELIVERY_DAYS + 1),
+        "pos": (_start[:, None] + np.arange(DELIVERY_DAYS + 1)).ravel(),
+        "kind": np.repeat(_ev["kind"].to_numpy(), DELIVERY_DAYS + 1),
+    })
+    delivery_days = delivery_days[delivery_days["pos"] < len(TRADING_DAYS)]
+    delivery_days = (
+        delivery_days.assign(date=TRADING_DAYS[delivery_days["pos"].to_numpy()])
+        .drop(columns="pos").drop_duplicates(["permno", "date"]).reset_index(drop=True)
+    )
+    return DELIVERY_DAYS, delivery_days
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## T2: daily changes
 
-    The change in holders from the previous trading day's count to today's. It is taken only when both counts exist, they are in the same segment and the previous count is above 0; otherwise it is missing and `status` says why.
+    The change in holders from the previous trading day's count to today's. It is taken only when both counts exist, they are in the same segment, the previous count is above 0 and the day is not a delivery day (T2a); otherwise it is missing and `status` says why.
 
     Everything here is mechanical. The choices made by looking at the data (the target's units, holder floors, winsorizing, which stocks to demean across, and the corporate-event exclusions) wait for the train/test split. The RTX restart shows why the corporate-event exclusion is needed: after the break on 2020-04-03 the new instrument climbs 2,323, 4,561, 6,575, 8,201 holders, positions moved over from UTX rather than buying.
     """)
@@ -1281,8 +1315,9 @@ def _(mo):
 
 
 @app.cell
-def _(TRADING_DAYS, np, pd, t1_count):
+def _(TRADING_DAYS, delivery_days, np, pd, t1_count):
     _c = t1_count.sort_values(["permno", "date"]).reset_index(drop=True)
+    _delivery = pd.MultiIndex.from_frame(_c[["permno", "date"]]).isin(pd.MultiIndex.from_frame(delivery_days[["permno", "date"]]))
     _day_no = pd.Series(TRADING_DAYS.get_indexer(_c["date"]))
     _same_permno = _c["permno"].eq(_c["permno"].shift())
     _prev = _c["holders"].shift()
@@ -1292,12 +1327,14 @@ def _(TRADING_DAYS, np, pd, t1_count):
             _day_no.diff().ne(1),
             _c["segment"].ne(_c["segment"].shift()),
             _prev.eq(0),
+            _delivery,
         ],
         [
             "first count of the PERMNO",
             "previous trading day has no count",
             "break since the previous count",
             "previous count is 0",
+            "delivery day (merger acquirer or spin-off)",
         ],
         default="ok",
     )
