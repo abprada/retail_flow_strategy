@@ -33,3 +33,6 @@ literature/
 
 # Explanations (kept local)
 explanations/
+
+# The WRDS Cloud bundle (built from scripts/wrds_cloud and src/dsr)
+data/wrds_cloud/
