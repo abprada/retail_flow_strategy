@@ -5,7 +5,7 @@
 The password is read from ~/.pgpass (line `wrds-pgdata.wharton.upenn.edu:9737:wrds:<you>:<password>`, chmod 600),
 from PGPASSWORD, or asked for interactively. WRDS may also send a Duo push.
 
-The cleaning (scripts/01_explore_and_clean_TAQ.py) was written on 2019-06-04 only. For the first trading day of 2014
+The cleaning (scripts/01_clean_and_explore_TAQ_raw_trades.py) was written on 2019-06-04 only. For the first trading day of 2014
 and the first trading day in June of each year 2014 to 2025, this saves:
     columns.csv        the columns of wct, mastm and ctm
     conditions.csv     wct trades by sale condition (tr_scond) and venue (ex)

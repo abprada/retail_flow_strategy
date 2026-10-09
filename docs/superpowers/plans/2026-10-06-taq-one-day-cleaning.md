@@ -4,7 +4,7 @@
 
 **Goal:** Clean one day of WRDS Consolidated Trades (2019-06-04) by the rules in the cleaning spec, entirely inside the TAQ notebook, so each step and what it removes can be read in one place. The notebook ends with the head of the clean trades.
 
-**Architecture:** One notebook, `scripts/01_explore_and_clean_TAQ.py`, with one section per spec step:
+**Architecture:** One notebook, `scripts/01_clean_and_explore_TAQ_raw_trades.py`, with one section per spec step:
 - a markdown cell saying what the step does and why;
 - a code cell producing the step's table;
 - a view of what the step removed.
@@ -103,7 +103,7 @@ Expected: 42,560,621 rows; `t_ns` integers; `nbb` floats with NaN where the text
 - [ ] **Step 4: Commit**
 
 ```bash
-git add scripts/01_explore_and_clean_TAQ.py
+git add scripts/01_clean_and_explore_TAQ_raw_trades.py
 git commit -m "Load and type one WCT day in the TAQ notebook"
 ```
 
@@ -152,7 +152,7 @@ Expected: `c1_matched == c1_to_drop`, about 1,025. The table also answers whethe
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/01_explore_and_clean_TAQ.py
+git add scripts/01_clean_and_explore_TAQ_raw_trades.py
 git commit -m "Remove corrected and cancelled trades in the TAQ cleaning"
 ```
 
@@ -204,7 +204,7 @@ Expected: about 571,500 trades dropped in 1,076 symbols, matching `explanations/
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/01_explore_and_clean_TAQ.py
+git add scripts/01_clean_and_explore_TAQ_raw_trades.py
 git commit -m "Match trades to PERMNOs in the TAQ cleaning"
 ```
 
@@ -313,7 +313,7 @@ Expected:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/01_explore_and_clean_TAQ.py
+git add scripts/01_clean_and_explore_TAQ_raw_trades.py
 git commit -m "Classify sale conditions and assign buckets in the TAQ cleaning"
 ```
 
@@ -406,6 +406,6 @@ In `explanations/TAQ/cleaning_spec.md`:
 - [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/01_explore_and_clean_TAQ.py explanations/TAQ/cleaning_spec.md
+git add scripts/01_clean_and_explore_TAQ_raw_trades.py explanations/TAQ/cleaning_spec.md
 git commit -m "Filter, flag and check the clean WCT trades and show their head"
 ```

@@ -2,7 +2,7 @@
 
     uv run python scripts/checks/TAQ_reference_day.py
 
-Runs the one-day cleaning notebook (scripts/01_explore_and_clean_TAQ.py) headless, about 5 minutes, then builds
+Runs the one-day cleaning notebook (scripts/01_clean_and_explore_TAQ_raw_trades.py) headless, about 5 minutes, then builds
 `daily`, `cells`, `bars` and `audit` from its trades exactly as explanations/taq_pull.md (sections 4 to 6) defines them,
 and runs the conservation checks of section 7 on them. All bin arithmetic is in whole numbers: prices in millionths of a
 dollar, so trades exactly on a bin edge (Z = 0.4 or 0.6) land where the spec says.
@@ -22,7 +22,7 @@ import pandas as pd
 from dsr.taq import check_day
 
 ROOT = Path(__file__).resolve().parents[2]
-NOTEBOOK = ROOT / "scripts" / "01_explore_and_clean_TAQ.py"
+NOTEBOOK = ROOT / "scripts" / "01_clean_and_explore_TAQ_raw_trades.py"
 BUCKET_CODES = {"overnight_morning": 0, "regular": 1, "last": 2, "overnight_evening": 3}
 TEN_MINUTES = 600 * 10**9
 LARGE = 100_000 * 10**6  # $100,000 in millionths of a dollar
@@ -171,7 +171,9 @@ def build_audit(defs: dict, kept_mask_all: np.ndarray) -> pd.DataFrame:
         rows += total("ctm", code, x, False)
     hits = corr[key].merge(raw[key], on=key, how="left", indicator=True)
     rows += total("ctm", "unmatched", corr[hits["_merge"].eq("left_only").to_numpy()], False)
-    rows += total("ctm", "record_after_cutoff", pairs[~pairs["record_counts"]], False)
+    paired = pairs["t_ns_record"].notna()
+    rows += total("ctm", "record_after_cutoff", pairs[paired & ~pairs["record_counts"]], False)
+    rows += total("ctm", "unpaired", pairs[~paired], False)
     return pd.DataFrame(rows)
 
 
