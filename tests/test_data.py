@@ -4,9 +4,11 @@ import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from dsr.data import copy_query, download, extract
+from dsr.data import copy_query, download, extract, query_to_parquet
 
 
 def _tar(path, files: dict[str, bytes]):
@@ -113,3 +115,29 @@ def test_copy_query_skips_existing_and_leaves_nothing_on_failure(tmp_path):
     with pytest.raises(ConnectionError):
         copy_query(_FakeConn(_broken()), "SELECT 1", fresh)
     assert not fresh.exists() and not fresh.with_name(fresh.name + ".part").exists()
+
+
+def test_query_to_parquet_keeps_every_value_as_text(tmp_path):
+    chunks = [b"date,symbol_15,cusip,round_lot,tick_pilot_indicator\n",
+              b"2019-06-04,AAPL,037833100,100,\n", b'2019-06-04,BRK A,084670108,10,""\n']
+    conn = _FakeConn(chunks)
+    dest = tmp_path / "raw" / "taq" / "master" / "mastm_20190604.parquet"
+
+    assert query_to_parquet(conn, "SELECT * FROM taqmsec.mastm_20190604", None, dest) == dest
+
+    table = pq.read_table(dest)
+    assert table.schema.names == ["date", "symbol_15", "cusip", "round_lot", "tick_pilot_indicator"]
+    assert all(t == pa.string() for t in table.schema.types)   # columns named by the header when none are given
+    assert table.column("cusip").to_pylist() == ["037833100", "084670108"]   # leading zeros kept
+    assert table.column("round_lot").to_pylist() == ["100", "10"]
+    assert table.column("tick_pilot_indicator").to_pylist() == ["", ""]   # NULL and empty both read as ""
+    assert not dest.with_suffix(".csv").exists() and not dest.with_name(dest.name + ".part").exists()
+
+
+def test_query_to_parquet_writes_empty_results_and_skips_existing(tmp_path):
+    empty = tmp_path / "empty.parquet"
+    query_to_parquet(_FakeConn([b"symbol_15,cusip\n"]), "SELECT 1", None, empty)
+    table = pq.read_table(empty)
+    assert table.num_rows == 0 and table.schema.names == ["symbol_15", "cusip"]
+
+    assert query_to_parquet(None, "SELECT 1", None, empty) == empty   # never touches the connection

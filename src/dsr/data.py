@@ -4,6 +4,7 @@ Every record must carry the timestamp at which it became publicly available,
 not just the event date it describes.
 """
 
+import csv
 import getpass
 import os
 import shutil
@@ -12,6 +13,9 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 import psycopg
+import pyarrow as pa
+import pyarrow.csv as pacsv
+import pyarrow.parquet as pq
 
 USER_AGENT = "dsr-research/0.1"
 
@@ -80,4 +84,31 @@ def copy_query(conn, query: str, dest: Path) -> Path:
         part.unlink(missing_ok=True)
         raise
     part.rename(dest)
+    return dest
+
+
+def query_to_parquet(conn, query: str, columns: list[str] | None, dest: Path) -> Path:
+    """Copy a query's result to dest as parquet, every column as a string. Skipped if dest exists.
+
+    The columns are those given, or the CSV header's when None. Values keep the text Postgres exports; NULL and the
+    empty string both become ""."""
+    dest = Path(dest)
+    if dest.exists():
+        return dest
+    tmp_csv = dest.with_suffix(".csv")
+    copy_query(conn, query, tmp_csv)
+    if columns is None:
+        with open(tmp_csv, newline="") as f:
+            columns = next(csv.reader(f))
+    part = dest.with_name(dest.name + ".part")
+    reader = pacsv.open_csv(
+        tmp_csv,
+        read_options=pacsv.ReadOptions(block_size=64 << 20),
+        convert_options=pacsv.ConvertOptions(column_types={c: pa.string() for c in columns}),
+    )
+    with pq.ParquetWriter(part, reader.schema, compression="zstd") as writer:
+        for batch in reader:
+            writer.write_batch(batch)
+    part.rename(dest)
+    tmp_csv.unlink()
     return dest

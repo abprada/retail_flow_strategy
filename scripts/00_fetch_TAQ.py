@@ -26,11 +26,9 @@ import os
 import sys
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
-from dsr.data import copy_query, wrds_connect
+from dsr.data import copy_query, query_to_parquet, wrds_connect
 
 ROOT = Path(__file__).resolve().parents[1]
 DATE = sys.argv[1] if len(sys.argv) > 1 else "2019-06-04"
@@ -54,26 +52,6 @@ def columns_of(conn, table: str) -> list[str]:
         path.unlink()
         raise SystemExit(f"taqmsec.{table}_{YMD} not found; see {(OUT / 'tables.csv').relative_to(ROOT)}")
     return names
-
-
-def query_to_parquet(conn, query: str, columns: list[str], dest: Path) -> Path:
-    """Copy a query's result to dest as parquet, every column as a string. Skipped if dest exists."""
-    if dest.exists():
-        return dest
-    tmp_csv = dest.with_suffix(".csv")
-    copy_query(conn, query, tmp_csv)
-    part = dest.with_name(dest.name + ".part")
-    reader = pacsv.open_csv(
-        tmp_csv,
-        read_options=pacsv.ReadOptions(block_size=64 << 20),
-        convert_options=pacsv.ConvertOptions(column_types={c: pa.string() for c in columns}),
-    )
-    with pq.ParquetWriter(part, reader.schema, compression="zstd") as writer:
-        for batch in reader:
-            writer.write_batch(batch)
-    part.rename(dest)
-    tmp_csv.unlink()
-    return dest
 
 
 def main() -> None:

@@ -1370,7 +1370,7 @@ def _(mo):
     mo.md(r"""
     ## CRSP daily data and classification
 
-    CRSP's daily stock data (`stkdlysecuritydata`) for the PERMNOs in T2, and its name records (`stocknames_v2`), which classify each security on each day. Both panels join them on PERMNO and date, and name every column by when it is known:
+    CRSP's daily stock data (`stkdlysecuritydata`) for the PERMNOs in T2, on the Robintrack days and the trading day on each side of them, and its name records (`stocknames_v2`), which classify each security on each day. Both panels join them on PERMNO and date, and name every column by when it is known:
 
     - **`*_prev`**: the previous trading day (return, price, open, high, low, close, volume, dollar volume, market cap). Known before the 15:50 cutoff on day t, so these can be inputs.
     - **`*_t`**: day t itself. Known only after day t's 16:00 close, so they describe the day and are never inputs to a decision at 15:50 on day t. What happens on day t up to 15:50 will come from TAQ.
@@ -1383,17 +1383,21 @@ def _(mo):
 
 
 @app.cell
-def _(CRSP_NAMES_PATH, pd, t2_change):
+def _(ALL_TRADING_DAYS, CRSP_NAMES_PATH, TRADING_DAYS, pd, t2_change):
     _names = {
         "dlyret": "ret", "dlyretx": "retx", "dlyretdurflg": "ret_span", "dlyprc": "price", "dlyprcflg": "price_flag",
         "dlyopen": "open", "dlyhigh": "high", "dlylow": "low", "dlyclose": "close", "dlyvol": "volume",
         "dlyprcvol": "dollar_volume", "dlycap": "cap", "dlydelflg": "delisted",
     }
+    # the file runs from 2013 (for the TAQ sample); the panels only join the Robintrack period and the trading day on
+    # each side of it (the previous-day and next-day columns)
+    _first = ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_loc(TRADING_DAYS[0]) - 1]
+    _last = ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_loc(TRADING_DAYS[-1]) + 1]
     crsp_daily = pd.read_csv(
-        CRSP_NAMES_PATH.parent / "stkdlysecuritydata_from_2017.csv", usecols=["permno", "dlycaldt", *_names], engine="pyarrow"
+        CRSP_NAMES_PATH.parent / "stkdlysecuritydata_from_2013.csv", usecols=["permno", "dlycaldt", *_names], engine="pyarrow"
     ).rename(columns={"dlycaldt": "date", **_names})
-    crsp_daily = crsp_daily[crsp_daily["permno"].isin(set(t2_change["permno"]))]
     crsp_daily["date"] = pd.to_datetime(crsp_daily["date"])
+    crsp_daily = crsp_daily[crsp_daily["permno"].isin(set(t2_change["permno"])) & crsp_daily["date"].between(_first, _last)]
 
     # CRSP return spans of one trading day: D1 to D4 by calendar days, DU for long closures, DD for a delisting return
     ONE_TRADING_DAY_SPANS = r"D[1-4UD]"

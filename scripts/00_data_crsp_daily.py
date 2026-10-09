@@ -1,15 +1,17 @@
-"""Download CRSP's daily stock data (CIZ format, crsp.stkdlysecuritydata) from 2017 onwards from WRDS, unchanged.
+"""Download CRSP's daily stock data (CIZ format, crsp.stkdlysecuritydata) from 2013 onwards from WRDS, unchanged.
 
     WRDS_USERNAME=<you> uv run python scripts/00_data_crsp_daily.py
 
 The password is read from ~/.pgpass (line `wrds-pgdata.wharton.upenn.edu:9737:wrds:<you>:<password>`, chmod 600),
 from PGPASSWORD, or asked for interactively. WRDS may also send a Duo push. Files already downloaded are skipped.
 
-Every row dated 2017-01-01 or later is kept, through the latest day CRSP has; later steps read only the dates they need.
+Every row dated 2013-01-01 or later is kept, through the latest day CRSP has (2025-12-31 in the annual release). The TAQ
+sample's first decision day is 2014-01-02, so 2013 gives a year of history before it for trailing windows. Later steps
+read only the dates they need: the Robintrack notebook keeps its own period.
 
 Outputs (gitignored):
     data/raw/crsp/stkdlysecuritydata_columns.csv          the table's column names and types, as WRDS lists them
-    data/raw/crsp/stkdlysecuritydata_from_2017.csv        every row dated 2017-01-01 or later, all columns
+    data/raw/crsp/stkdlysecuritydata_from_2013.csv        every row dated 2013-01-01 or later, all columns
 """
 
 import csv
@@ -21,8 +23,8 @@ from dsr.data import copy_query, wrds_connect
 ROOT = Path(__file__).resolve().parents[1]
 CRSP = ROOT / "data" / "raw" / "crsp"
 COLUMNS = CRSP / "stkdlysecuritydata_columns.csv"
-DAILY = CRSP / "stkdlysecuritydata_from_2017.csv"
-START = "2017-01-01"
+DAILY = CRSP / "stkdlysecuritydata_from_2013.csv"
+START = "2013-01-01"
 
 
 def main() -> None:
