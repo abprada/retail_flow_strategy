@@ -6,6 +6,7 @@
 #$ -N taq_pilot
 #$ -cwd
 #$ -j y
+#$ -l m_mem_free=24G   # per slot: 2 slots x 24 GB = 48 GB, the most WRDS allows a job
 #$ -o /scratch/mit/$USER/taq_logs/$JOB_NAME.$JOB_ID.log
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 cd ~/taq

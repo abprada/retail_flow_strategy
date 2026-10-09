@@ -96,7 +96,7 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
     if day.has_tr_id:  # pair each flagged trade with its record, on symbol, venue and trade ID
         pairs = f"""
         SELECT o.*, r.t AS t_record, r.price AS price_r, r.size AS size_r, r.cond AS cond_r,
-               (o.t >= {cut}) OR COALESCE(r.t < {cut}, FALSE) AS record_counts
+               (o.t >= {cut}) OR COALESCE(r.t < {cut}, FALSE) AS record_counts, r.t IS NOT NULL AS paired
         FROM ctm_f o LEFT JOIN ctm_f r
           ON r.tr_corr IN ('10', '11', '12') AND o.sym_root = r.sym_root AND o.sym_suffix = r.sym_suffix
              AND o.ex = r.ex AND o.tr_id = r.tr_id
@@ -104,7 +104,7 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
     else:  # 2014 and 2015: no trade IDs, so every record counts (the end-of-day view)
         pairs = """
         SELECT o.*, CAST(NULL AS BIGINT) AS t_record, o.price AS price_r, o.size AS size_r, o.cond AS cond_r,
-               TRUE AS record_counts
+               TRUE AS record_counts, TRUE AS paired
         FROM ctm_f o WHERE o.tr_corr IN ('01', '07', '08')"""
 
     keys = ", ".join(key)
@@ -250,7 +250,10 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
         UNION ALL
         SELECT 'ctm', 'record_after_cutoff', CASE WHEN ex = 'D' THEN 1 ELSE 0 END, FALSE, COUNT(*), SUM(size),
                {sum_dollars}
-        FROM pairs WHERE NOT record_counts GROUP BY CASE WHEN ex = 'D' THEN 1 ELSE 0 END"""
+        FROM pairs WHERE paired AND NOT record_counts GROUP BY CASE WHEN ex = 'D' THEN 1 ELSE 0 END
+        UNION ALL
+        SELECT 'ctm', 'unpaired', CASE WHEN ex = 'D' THEN 1 ELSE 0 END, FALSE, COUNT(*), SUM(size), {sum_dollars}
+        FROM pairs WHERE NOT paired GROUP BY CASE WHEN ex = 'D' THEN 1 ELSE 0 END"""
 
     if d.name == "duckdb":
         # DuckDB takes each bar's first and last trade with arg_min and arg_max: one pass, no sorting, unlike the three
