@@ -15,10 +15,8 @@ wheels/
 .ipynb_checkpoints/
 __marimo__/
 
-# Data (raw pulls and derived artifacts stay local)
-data/raw/*
-data/intermediate/*
-!data/**/.gitkeep
+# Data (raw pulls and derived artifacts stay local; nothing under data/ is tracked)
+data/
 
 # OS / editor
 .DS_Store
@@ -33,6 +31,3 @@ literature/
 
 # Explanations (kept local)
 explanations/
-
-# The WRDS Cloud bundle (built from scripts/wrds_cloud and src/dsr)
-data/wrds_cloud/
