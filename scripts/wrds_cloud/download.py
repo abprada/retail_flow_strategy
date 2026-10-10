@@ -26,7 +26,7 @@ Each round (every --every minutes until every day asked for is here, made by the
      WRDS scratch (500 GB
      shared by the institution, emptied after 7 days), only after the check passed.
 
-Output (gitignored): data/intermediate/taq/by_wct_day/<YYYYMMDD>/ (one folder per WCT day, as the job wrote it),
+Output (gitignored): data/raw/taq/pull/<YYYYMMDD>/ (one folder per WCT day, as the job wrote it),
     manifests/ (the jobs' manifests), downloaded.csv (the checked days: day, version, checked_at).
 """
 
@@ -52,7 +52,7 @@ _job = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_job)
 VERSION = _job.code_version()  # only days made by the current code are downloaded
 
-LOCAL = ROOT / "data" / "intermediate" / "taq" / "by_wct_day"
+LOCAL = ROOT / "data" / "raw" / "taq" / "pull"
 DAYS = Path(__file__).resolve().parent / "days.csv"
 
 

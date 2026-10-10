@@ -8,7 +8,7 @@ Generates the DuckDB dialect of the query (src/dsr/taq_sql.py) for 2019-06-04, r
 (wct.parquet, ctm_corrections.parquet), writes the four tables, runs the conservation checks, and compares every table
 row by row with the Python reference (scripts/checks/TAQ_reference_day.py), if that has been built.
 
-Outputs (gitignored), in data/intermediate/taq/duckdb/20190604/:
+Outputs (gitignored), in data/raw/taq/checks/duckdb/20190604/:
     daily.parquet, cells.parquet, bars.parquet, audit.parquet, checks.csv, comparison.csv
 """
 
@@ -25,8 +25,8 @@ from dsr.taq_sql import Dialect, day_parameters, day_sql
 ROOT = Path(__file__).resolve().parents[2]
 DATE = "2019-06-04"
 RAW = ROOT / "data" / "raw" / "taq" / DATE
-REFERENCE = ROOT / "data" / "intermediate" / "taq" / "reference" / DATE.replace("-", "")
-OUT = ROOT / "data" / "intermediate" / "taq" / "duckdb" / DATE.replace("-", "")
+REFERENCE = ROOT / "data" / "raw" / "taq" / "checks" / "reference" / DATE.replace("-", "")
+OUT = ROOT / "data" / "raw" / "taq" / "checks" / "duckdb" / DATE.replace("-", "")
 NS = 10**9
 
 

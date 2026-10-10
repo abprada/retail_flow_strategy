@@ -12,7 +12,7 @@ output table), and saves the four tables, the SQL, the time and size of every st
 For 2019-06-04 it also compares every table row by row with the Python reference
 (scripts/checks/TAQ_reference_day.py): the golden test passes only if nothing differs.
 
-Outputs (gitignored), in data/intermediate/taq/wrds_test/<YYYYMMDD>/:
+Outputs (gitignored), in data/raw/taq/checks/wrds_test/<YYYYMMDD>/:
     daily.csv, cells.csv, bars.csv, audit.csv   the tables as WRDS returns them
     query.sql                                   the statements sent, with the query version (a hash of them)
     timing.csv, checks.csv, comparison.csv      seconds and bytes per statement; checks; the golden comparison
@@ -31,8 +31,8 @@ from dsr.taq import KEYS, check_day, compare_tables, read_pulled_csv, run_day
 from dsr.taq_sql import Dialect, day_parameters, day_sql
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "data" / "intermediate" / "taq" / "wrds_test"
-REFERENCE = ROOT / "data" / "intermediate" / "taq" / "reference"
+OUT = ROOT / "data" / "raw" / "taq" / "checks" / "wrds_test"
+REFERENCE = ROOT / "data" / "raw" / "taq" / "checks" / "reference"
 
 
 def has_column(conn, table: str, column: str) -> bool:

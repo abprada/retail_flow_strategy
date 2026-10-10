@@ -11,7 +11,7 @@ def _(mo):
 
     ## 0. Table heads
 
-    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/intermediate/taq/by_wct_day/20190604/`, defined in `explanations/taq_pull.md`), and that day's master file (`data/raw/taq/master/`).
+    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/raw/taq/pull/20190604/`, the WRDS pull as downloaded, defined in `explanations/taq_pull.md`), and that day's master file (`data/raw/taq/master/`).
 
     **What to look at:** the keys (`symbol`, `bucket`, `bar`, the `cells` codes), the units (prices in dollars, `last_trade_time` in nanoseconds after midnight) and the size of each table.
     """)
@@ -29,9 +29,13 @@ def _():
     from matplotlib.colors import LogNorm
 
     from dsr.crsp import class_on, is_common_stock, read_name_records, security_type
-    from dsr.taq_link import WHEN_ISSUED_SUFFIXES, link_permnos, mark_primary
+    from dsr.taq_link import PILOT_END, PILOT_START, WHEN_ISSUED_SUFFIXES, link_permnos, mark_primary, pilot_groups
+    from dsr.taq_split import CODES, write_decision_days
 
     return (
+        CODES,
+        PILOT_END,
+        PILOT_START,
         WHEN_ISSUED_SUFFIXES,
         class_on,
         is_common_stock,
@@ -40,10 +44,12 @@ def _():
         mo,
         np,
         pd,
+        pilot_groups,
         plt,
         pq,
         read_name_records,
         security_type,
+        write_decision_days,
         xcals,
     )
 
@@ -51,7 +57,7 @@ def _():
 @app.cell
 def _(mo):
     DATA_DIR = mo.notebook_dir().parent / "data"
-    PULL_DIR = DATA_DIR / "intermediate" / "taq" / "by_wct_day"  # one folder per WCT day: daily, cells, bars, audit
+    PULL_DIR = DATA_DIR / "raw" / "taq" / "pull"  # the WRDS pull, one folder per WCT day: daily, cells, bars, audit
     MASTER_DIR = DATA_DIR / "raw" / "taq" / "master"  # mastm_<YYYYMMDD>.parquet, every column as text
     DAY = "20190604"
     return DATA_DIR, DAY, MASTER_DIR, PULL_DIR
@@ -87,8 +93,8 @@ def _(mo):
     **Purpose:** make the test-period rule structural instead of a matter of care. Values (anything computed from `daily`, `cells` or `bars`) are read on training days only; keys (which symbol traded, in which bucket and bar), the manifests and `audit` are mechanical and read on every day.
 
     - `ALL_DAYS`: every WCT day pulled, 2013-12-31 to 2025-12-31.
-    - `TRAIN_DAYS`: the WCT days whose rows all feed training decision days. The test period starts with decision day 2023-01-03, whose last bar and evening piece come from WCT day 2022-12-30, so the training days end on 2022-12-29.
-    - `SAMPLE_DAYS`: one training day a month from 2014, drawn at random with a fixed seed, for distributions that do not need all 2,266 days.
+    - `TRAIN_DAYS`: the WCT days whose rows all feed training decision days. The test period is decision days 2024-01-02 to 2025-12-31; its first day's last bar and evening piece come from WCT day 2023-12-29, so the training days end on 2023-12-28.
+    - `SAMPLE_DAYS`: one training day a month from 2014, drawn at random with a fixed seed, for distributions that do not need every training day.
     - `per_day`: reads chosen columns of one table for each day in a list, applies a function to each day and stacks the results. It refuses value columns of `daily`, `cells` and `bars` outside the training days.
     """)
     return
@@ -97,7 +103,7 @@ def _(mo):
 @app.cell
 def _(PULL_DIR, mo, pd):
     ALL_DAYS = sorted(_p.name for _p in PULL_DIR.iterdir() if _p.name.isdigit())  # every WCT day pulled, YYYYMMDD
-    TEST_START = "20230103"  # first decision day of the test period
+    TEST_START = "20240102"  # first decision day of the test period (test: 2024 and 2025)
     TRAIN_DAYS = ALL_DAYS[: ALL_DAYS.index(TEST_START) - 1]  # the WCT day before TEST_START already feeds it
     _train = pd.Series(TRAIN_DAYS)
     _train = _train[_train >= "20140101"]  # 2013-12-31 is pulled only for the first decision day's pieces
@@ -115,7 +121,7 @@ def _(PULL_DIR, mo, pd):
     | `TRAIN_DAYS` {_span(TRAIN_DAYS)}
     | `SAMPLE_DAYS` {_span(SAMPLE_DAYS)}
     """)
-    return ALL_DAYS, TRAIN_DAYS
+    return ALL_DAYS, TEST_START, TRAIN_DAYS
 
 
 @app.cell
@@ -544,6 +550,98 @@ def _(DATA_DIR, mo, symbol_checks, symbols, write_symbols):
     symbols.to_parquet(_part, index=False)
     _part.rename(_path)
     mo.md(f"Written: `{_path.relative_to(DATA_DIR.parent)}`, {len(symbols):,} rows, {_path.stat().st_size / 1e6:,.0f} MB")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 5. The data by decision day: what is known at 15:50
+
+    **Purpose:** rewrite the pull so each day's folder holds exactly what is known at that day's 15:50 cutoff, split into train (decision days 2014-01-02 to 2023-12-29) and test (2024-01-02 to 2025-12-31), in `data/intermediate/taq/train/<YYYYMMDD>/` and `test/<YYYYMMDD>/`.
+
+    **Rule** (`dsr.taq_split`): decision day D holds its own morning piece and session (buckets 0 and 1, to 15:50) and `daily`, and the previous trading day's last 10 minutes and evening piece (buckets 2 and 3, after that day's 15:50). Rows are copied unchanged: nothing is combined, recomputed, added or dropped. Every row of `daily`, `cells` and `bars` gets `traded_day` (the trading day it happened) and its `permno` and `primary` (`symbols.parquet`) from that day, so the previous day's pieces keep that day's PERMNO across a ticker change; each `cells` and `bars` row also gets a readable `piece` (`prev_last10`, `prev_evening`, `pre_open`, `session`), and rows run by symbol and in time order. `data/intermediate/taq/codes.csv` says what every code means (`bucket`, `venue`, `z`, `q`, `spread`, `size`). The overnight bar is glued and empty bars filled later, when features are built. `audit` stays with the pull in `data/raw/taq/pull/`; the next-day returns come with the final clean data. WCT day 2013-12-31 only lends its evening to 2014-01-02; the evening of 2025-12-31 feeds a day outside the sample.
+
+    **What we check** (after writing): every row of the pull lands in exactly one decision day, except those two edges; per WCT day and bucket, the rows and trades of `cells` and `bars` are equal before and after; every day of 2014-2023 is in train and every day of 2024-2025 in test; every row's `traded_day` is the decision day (`pre_open`, `session`) or the trading day before (`prev_last10`, `prev_evening`); no stock is counted twice (at most one primary row per PERMNO in each time piece and bar).
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    write_by_decision_day = mo.ui.run_button(label="Write data/intermediate/taq/train/ and test/ (about an hour)")
+    write_by_decision_day
+    return (write_by_decision_day,)
+
+
+@app.cell
+def _(
+    ALL_DAYS,
+    CODES,
+    DATA_DIR,
+    PULL_DIR,
+    TEST_START,
+    mo,
+    symbols,
+    write_by_decision_day,
+    write_decision_days,
+):
+    mo.stop(not write_by_decision_day.value, mo.md("Press the button to write."))
+    DECISION_DIR = DATA_DIR / "intermediate" / "taq"
+    CODES.to_csv(DECISION_DIR / "codes.csv", index=False)
+    _links = {_d.strftime("%Y%m%d"): _g[["symbol", "permno", "primary"]] for _d, _g in symbols.groupby("day")}
+    decision_days = write_decision_days(
+        PULL_DIR, DECISION_DIR, ALL_DAYS, TEST_START, _links.get,
+        progress=lambda _pairs: mo.status.progress_bar(_pairs, title="Writing decision days", remove_on_exit=True),
+    )
+    decision_days.groupby("period").agg(days=("decision_day", "size"), first=("decision_day", "min"), last=("decision_day", "max"))
+    return DECISION_DIR, decision_days
+
+
+@app.cell
+def _(
+    ALL_DAYS,
+    DECISION_DIR,
+    PULL_DIR,
+    TEST_START,
+    decision_days,
+    mo,
+    np,
+    pd,
+    pq,
+):
+    def _bucket_totals(folder, buckets):
+        """Rows and trades of cells and bars by bucket in one folder."""
+        out = {}
+        for _name in ["cells", "bars"]:
+            _t = pq.read_table(folder / f"{_name}.parquet", columns=["bucket", "trades"]).to_pandas()
+            _t = _t[_t["bucket"].isin(buckets)]
+            out[_name] = _t.groupby("bucket")["trades"].agg(["size", "sum"])
+        return out
+
+
+    _bad, _twice, _wrong_day = [], 0, 0
+    for _prev, _day, _period in mo.status.progress_bar(
+        list(zip(ALL_DAYS[:-1], ALL_DAYS[1:], decision_days["period"])), title="Checking", remove_on_exit=True
+    ):
+        _written = _bucket_totals(DECISION_DIR / _period / _day, [0, 1, 2, 3])
+        _own, _before = _bucket_totals(PULL_DIR / _day, [0, 1]), _bucket_totals(PULL_DIR / _prev, [2, 3])
+        _b = pq.read_table(DECISION_DIR / _period / _day / "bars.parquet", columns=["permno", "primary", "bucket", "bar", "traded_day"]).to_pandas()
+        _expect = np.where(_b["bucket"].isin([0, 1]), pd.Timestamp(_day), pd.Timestamp(_prev))
+        _wrong_day += int((_b["traded_day"].to_numpy() != _expect.astype(_b["traded_day"].dtype)).sum())
+        _twice += int(_b[_b["primary"]].duplicated(["permno", "bucket", "bar"]).sum())
+        for _name in ["cells", "bars"]:
+            if not _written[_name].sort_index().equals(pd.concat([_before[_name], _own[_name]]).sort_index()):
+                _bad.append((_day, _name))
+    decision_checks = pd.DataFrame([
+        ("one folder per decision day, 2014-01-02 to 2025-12-31", list(decision_days["decision_day"]) == ALL_DAYS[1:]),
+        ("2014-2023 in train, 2024-2025 in test", bool((decision_days["period"] == np.where(
+            decision_days["decision_day"] < TEST_START, "train", "test")).all())),
+        ("rows and trades of cells and bars equal the pull's, per WCT day and bucket", not _bad),
+        ("every row's traded_day is the decision day (pre_open, session) or the day before (prev_last10, prev_evening)", _wrong_day == 0),
+        ("no stock counted twice: at most one primary row per PERMNO in each time piece and bar", _twice == 0),
+    ], columns=["check", "passed"])
+    decision_checks
     return
 
 

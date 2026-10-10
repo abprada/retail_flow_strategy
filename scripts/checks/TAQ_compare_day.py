@@ -14,7 +14,7 @@ import pandas as pd
 from dsr.taq import KEYS, compare_tables
 
 ROOT = Path(__file__).resolve().parents[2]
-REFERENCE = ROOT / "data" / "intermediate" / "taq" / "reference" / "20190604"
+REFERENCE = ROOT / "data" / "raw" / "taq" / "checks" / "reference" / "20190604"
 
 
 def main() -> None:

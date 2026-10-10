@@ -7,7 +7,7 @@ Runs the one-day cleaning notebook (scripts/01_clean_and_explore_TAQ_raw_trades.
 and runs the conservation checks of section 7 on them. All bin arithmetic is in whole numbers: prices in millionths of a
 dollar, so trades exactly on a bin edge (Z = 0.4 or 0.6) land where the spec says.
 
-Outputs (gitignored), in data/intermediate/taq/reference/20190604/:
+Outputs (gitignored), in data/raw/taq/checks/reference/20190604/:
     daily.parquet, cells.parquet, bars.parquet, audit.parquet   the four tables, rows as the query would write them
     checks.csv                                                  the conservation checks
 """
@@ -200,7 +200,7 @@ def main() -> None:
         "bars": build_bars(sym_code, sym_names, t["price"].to_numpy(dtype=float), c),
         "audit": build_audit(defs, kept_all),
     }
-    out = ROOT / "data" / "intermediate" / "taq" / "reference" / day.replace("-", "")
+    out = ROOT / "data" / "raw" / "taq" / "checks" / "reference" / day.replace("-", "")
     out.mkdir(parents=True, exist_ok=True)
     for name, df in tables.items():
         df.to_parquet(out / f"{name}.parquet", compression="zstd", index=False)

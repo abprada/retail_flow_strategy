@@ -12,8 +12,8 @@ rows exist locally, which is all the query reads), then runs exactly the stateme
 conservation checks and compares every table with the Python reference (scripts/checks/TAQ_reference_day.py).
 Catches Postgres-only errors (types, functions, syntax) without a WRDS connection.
 
-Outputs (gitignored): data/intermediate/taq/postgres_local/20190604/ (the four tables as CSV, timing, checks,
-comparison); the server's data directory in data/intermediate/taq/postgres_local/pgdata/ (loaded once, reused).
+Outputs (gitignored): data/raw/taq/checks/postgres_local/20190604/ (the four tables as CSV, timing, checks,
+comparison); the server's data directory in data/raw/taq/checks/postgres_local/pgdata/ (loaded once, reused).
 """
 
 import csv
@@ -35,9 +35,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DATE = "2019-06-04"
 YMD = DATE.replace("-", "")
 RAW = ROOT / "data" / "raw" / "taq" / DATE
-BASE = ROOT / "data" / "intermediate" / "taq" / "postgres_local"
+BASE = ROOT / "data" / "raw" / "taq" / "checks" / "postgres_local"
 OUT = BASE / YMD
-REFERENCE = ROOT / "data" / "intermediate" / "taq" / "reference" / YMD
+REFERENCE = ROOT / "data" / "raw" / "taq" / "checks" / "reference" / YMD
 
 
 def load(conn, table: str, parquet: Path, columns_csv: Path) -> None:
