@@ -1,6 +1,6 @@
 import pandas as pd
 
-from dsr.taq_link import link_permnos
+from dsr.taq_link import link_permnos, mark_primary, pilot_groups
 
 
 def _names(*rows):
@@ -38,14 +38,12 @@ def test_dated_record_gives_the_permno_in_force_that_day():
     assert out.loc[(pd.Timestamp("2015-06-01"), "A"), "permno"] == 1
     assert out.loc[(pd.Timestamp("2015-08-03"), "A"), "permno"] == 2
     assert (out["rule"] == "dated").all()
-    assert out.loc[(pd.Timestamp("2015-08-03"), "A"), "ticker"] == "NEW"
 
 
 def test_cusip_of_a_single_permno_links_outside_its_dates():
     out = _link([("2016-01-05", "B")], _masters(("2016-01-05", "B", "BBB222222")), NAMES)
     row = out.loc[(pd.Timestamp("2016-01-05"), "B")]
     assert row["permno"] == 3 and row["rule"] == "undated"
-    assert row["securitysubtype"] == "ETF"  # classification from the nearest name record
 
 
 def test_cusip_of_several_permnos_none_dated_is_not_linked():
@@ -94,3 +92,55 @@ def test_match_ignores_the_check_digit():
     names = _names(("9", "2010-01-01", "2025-12-31", "P1699413X", "EQTY", "COM", "NS", "BLX"))
     out = _link([("2019-06-04", "BLX")], _masters(("2019-06-04", "BLX", "P16994132")), names)
     assert out.loc[(pd.Timestamp("2019-06-04"), "BLX"), "permno"] == 9
+
+
+def test_symbol_written_without_its_space_in_the_master():
+    """Until 2016-10 the master writes Nasdaq class shares joined (LVNTA) where the trades split them (LVNT A)."""
+    masters = _masters(("2015-06-01", "AAA11", "AAA111111"))
+    out = _link([("2015-06-01", "AAA1 1")], masters, NAMES)
+    row = out.loc[(pd.Timestamp("2015-06-01"), "AAA1 1")]
+    assert row["permno"] == 1 and row["master_symbol"] == "AAA11" and row["master_day"] == pd.Timestamp("2015-06-01")
+
+
+def test_earlier_master_at_most_five_trading_days_back():
+    days = ["2015-08-03", "2015-08-04", "2015-08-05", "2015-08-06", "2015-08-07", "2015-08-10", "2015-08-11"]
+    masters = _masters(("2015-08-03", "A", "AAA111111"), ("2015-08-04", "B", "AAA111111"),
+                       *[(d, "Z", "ZZZ999999") for d in days])
+    out = _link([("2015-08-10", "A"), ("2015-08-11", "A"), ("2015-08-11", "B")], masters, NAMES)
+    assert out.loc[(pd.Timestamp("2015-08-10"), "A"), "permno"] == 2  # 5 trading days back
+    assert out.loc[(pd.Timestamp("2015-08-11"), "A"), "rule"] == "not in a master"  # 6 back
+    assert out.loc[(pd.Timestamp("2015-08-11"), "B"), "permno"] == 2  # 5 back
+
+
+def test_primary_symbol_per_permno_and_day():
+    links = pd.DataFrame({
+        "day": pd.to_datetime(["2016-01-14"] * 8),
+        "symbol": ["KMI", "KMI WI", "ACE", "CB", "MKC V", "TBPH V", "TBPH", "ZZZ"],
+        "permno": pd.array([1, 1, 2, 2, 3, 4, 4, pd.NA], dtype="Int64"),
+        "ticker": ["KMI", "KMI", "ACE", "ACE", "MKC", "TBPH", "TBPH", None],
+    })
+    out = mark_primary(links)
+    assert out["symbols_on_permno"].tolist() == [2, 2, 2, 2, 1, 2, 2, 0]
+    # the regular symbol over its when-issued twin; CRSP's ticker between two regular ones; a symbol alone on its
+    # PERMNO whatever its suffix (MKC V is McCormick's voting class, not when issued); never without a PERMNO
+    assert out["primary"].tolist() == [True, False, True, False, True, False, True, False]
+
+
+def test_class_share_symbol_matches_its_crsp_ticker_without_the_space():
+    links = pd.DataFrame({"day": pd.to_datetime(["2016-01-14"] * 2), "symbol": ["BRK B", "BRKX"],
+                          "permno": pd.array([5, 5], dtype="Int64"), "ticker": ["BRKB", "BRKB"]})
+    assert mark_primary(links)["primary"].tolist() == [True, False]
+
+
+def test_pilot_group_inside_the_pilot_from_the_settled_assignment():
+    masters = pd.DataFrame({
+        "day": pd.to_datetime(["2016-09-30", "2016-10-05", "2016-10-24", "2016-10-31", "2017-06-01", "2018-09-28",
+                               "2018-10-01"]),
+        "symbol": ["ABC"] * 7,
+        "cusip": ["AAA111111"] * 7,
+        "tick_pilot_indicator": [None, "", "C", "3", "3", "3", "C"],
+    })
+    out = pilot_groups(masters)
+    # none before or after the pilot; early October takes the group the CUSIP shows on 2016-10-31 (G3 stocks still
+    # show C until they switch)
+    assert out["pilot_group"].tolist() == [None, "3", "3", "3", "3", "3", None]

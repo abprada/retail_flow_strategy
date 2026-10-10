@@ -9,9 +9,11 @@ def _(mo):
     mo.md(r"""
     # TAQ: cleaning the full pull
 
-    ## Table heads
+    ## 0. Table heads
 
-    The first rows of each table on one WCT day, 2019-06-04: the four tables the pull wrote (`data/intermediate/taq/by_wct_day/20190604/`, defined in `explanations/taq_pull.md`) and the day's master file (`data/raw/taq/master/`).
+    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/intermediate/taq/by_wct_day/20190604/`, defined in `explanations/taq_pull.md`), and that day's master file (`data/raw/taq/master/`).
+
+    **What to look at:** the keys (`symbol`, `bucket`, `bar`, the `cells` codes), the units (prices in dollars, `last_trade_time` in nanoseconds after midnight) and the size of each table.
     """)
     return
 
@@ -21,13 +23,29 @@ def _():
     import exchange_calendars as xcals
     import marimo as mo
     import matplotlib.pyplot as plt
+    import numpy as np
     import pandas as pd
     import pyarrow.parquet as pq
     from matplotlib.colors import LogNorm
 
-    from dsr.taq_link import link_permnos
+    from dsr.crsp import class_on, is_common_stock, read_name_records, security_type
+    from dsr.taq_link import WHEN_ISSUED_SUFFIXES, link_permnos, mark_primary
 
-    return LogNorm, link_permnos, mo, pd, plt, pq, xcals
+    return (
+        WHEN_ISSUED_SUFFIXES,
+        class_on,
+        is_common_stock,
+        link_permnos,
+        mark_primary,
+        mo,
+        np,
+        pd,
+        plt,
+        pq,
+        read_name_records,
+        security_type,
+        xcals,
+    )
 
 
 @app.cell
@@ -64,14 +82,14 @@ def _(heads, mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Exploring the pull: setup
+    ## Setup: day lists and the reader
 
-    What the pull wrote, looked at table by table. Values (anything computed from `daily`, `cells` or `bars`) are looked at on training days only; the manifests and `audit` are mechanical and cover all days.
+    **Purpose:** make the test-period rule structural instead of a matter of care. Values (anything computed from `daily`, `cells` or `bars`) are read on training days only; keys (which symbol traded, in which bucket and bar), the manifests and `audit` are mechanical and read on every day.
 
     - `ALL_DAYS`: every WCT day pulled, 2013-12-31 to 2025-12-31.
     - `TRAIN_DAYS`: the WCT days whose rows all feed training decision days. The test period starts with decision day 2023-01-03, whose last bar and evening piece come from WCT day 2022-12-30, so the training days end on 2022-12-29.
     - `SAMPLE_DAYS`: one training day a month from 2014, drawn at random with a fixed seed, for distributions that do not need all 2,266 days.
-    - `per_day`: reads the chosen columns of one table for each day in a list, applies a function to each day, and stacks the results. It refuses days outside the training period for `daily`, `cells` and `bars`.
+    - `per_day`: reads chosen columns of one table for each day in a list, applies a function to each day and stacks the results. It refuses value columns of `daily`, `cells` and `bars` outside the training days.
     """)
     return
 
@@ -106,9 +124,10 @@ def _(PULL_DIR, TRAIN_DAYS, mo, pd, pq):
         """Apply fn to one table on each day in days and stack the results, with the day as the first column.
 
         Reads only `columns` of each day's file, so a pass over every training day fits in memory. fn takes the day's
-        DataFrame and returns a DataFrame. The pull's values (daily, cells, bars) are read on training days only.
+        DataFrame and returns a DataFrame. The pull's values (daily, cells, bars) are read on training days only; their
+        keys (which symbol traded, in which bucket and bar) and the audit are mechanical and readable on every day.
         """
-        if table != "audit" and not set(days) <= set(TRAIN_DAYS):
+        if table != "audit" and set(columns) - {"symbol", "bucket", "bar"} and not set(days) <= set(TRAIN_DAYS):
             raise ValueError(f"{table}: values are looked at on training days only")
         parts = []
         for day in mo.status.progress_bar(days, title=f"Reading {table}", remove_on_exit=True):
@@ -123,11 +142,17 @@ def _(PULL_DIR, TRAIN_DAYS, mo, pd, pq):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Inventory
+    ## 1. Inventory
 
-    The manifests: one row per WCT day, written by the WRDS job, with the rows of each table, the MB of raw trades read from WRDS (`wct_rows_mb`, CSV) and written (`out_mb`, parquet), the day's close, and whether it has nanosecond timestamps and trade IDs. Row counts are mechanical, so every day is shown, with the test period shaded.
+    **Purpose:** check that the pull is complete and that each day looks like the days around it, from the manifests (one row per WCT day, written by the WRDS job; mechanical, so every day, the test period shaded).
 
-    A day that differs from its neighbours is found by dividing each count by the median of the 21 days around it, so the growth over the years does not hide it. Early closes (20 regular bars instead of 38) are marked and listed apart.
+    **What we check, and what the output shows:**
+
+    1. **No day missing or extra:** the days pulled are exactly NYSE's sessions (the cell stops otherwise). Yes: 3,019 days, 2013-12-31 to 2025-12-31.
+    2. **Every day passed its checks**, under a known code version. Yes. 1,108 days were pulled again with the corrections paired on sequence numbers (code version `242c83d5bae3`); a day pulled again has a row per version, and the one on disk is `downloaded.csv`'s last entry.
+    3. **Less trading on early close days:** on the 26 days that close at 13:00, `bars` has about 55% of a normal day's rows (20 regular bars instead of 38) and every count dips (red dots). Yes.
+    4. **No day breaks from its neighbours:** the counts move smoothly. The lasting shifts are the market's: symbols from about 7,500 a day to 11,000 (the 2020-2021 rise and 2022 fall are SPAC units and warrants), and `cells` nearly doubling from 2020. The one-day spikes are busy markets (2015-08-24, Brexit, the 2016 election, April 2025) and the dips holiday weeks.
+    5. **2014 and 2015 are the older format:** no nanosecond timestamps and no trade-ID column (505 days).
     """)
     return
 
@@ -194,33 +219,20 @@ def _(ALL_DAYS, TRAIN_DAYS, manifest, pd, plt):
     return
 
 
-@app.cell
-def _(manifest, mo, pd):
-    _counts = ["daily_rows", "bars_rows", "cells_rows", "wct_rows_mb"]
-    _ratio = manifest[_counts] / manifest[_counts].rolling(21, center=True, min_periods=11).median()
-    _table = pd.concat([manifest["day"].dt.date, manifest["close"], _ratio.round(2)], axis=1)
-    _far = (manifest["close"] == "16:00") & ((_ratio < 2 / 3) | (_ratio > 1.5)).any(axis=1)
-    mo.vstack([
-        mo.md("Each count divided by the median of the 21 days around it. **Normal-close days at least 1.5 times above or "
-              "below that median** in any count:"),
-        _table[_far],
-        mo.md("**The early closes:**"),
-        _table[manifest["close"] == "13:00"],
-    ])
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Audit
+    ## 2. Audit
 
-    What the cleaning on WRDS removed, every day (`audit`; mechanical, so all days). Four sections:
+    **Purpose:** check what the cleaning on WRDS removed, every day (`audit`; mechanical, so all days). The cleaning drops correction records and cancelled trades (as known at the cutoff), trades with excluded sale conditions, and prices under $1.
 
-    - `step`: the trades read (`raw`), the trades removed at each step (`records`, `cancelled_or_erroneous`, `sale_condition`, `price_or_size`) and those `kept`; `restored_original` counts corrected trades given back their original data, which stay.
-    - `ctm`: the trade file's flagged rows by correction code (`01` corrected, `07` erroneous, `08` cancelled, and their records `12`, `11`, `10`), and three counts: `unmatched` (not found in `wct`), `record_after_cutoff` (the record came at or after the cutoff, so the trade stays as printed) and `unpaired` (no record with the same trade ID; trade IDs exist from 2016).
-    - `condition`: trades by sale-condition string, by venue, and whether they were kept.
-    - `venue_code`: trades by venue code and whether they were kept.
+    **What we check, and what the output shows:**
+
+    1. **Nothing is lost silently:** raw trades minus each removal step equal the kept trades, every day and venue (the cell stops otherwise). Yes: 166.8 billion raw trades, 161.2 billion (96.6%) kept.
+    2. **How much each step removes, and whether that changes over time** (plot): sale conditions remove about 1% of off-exchange trades in 2014 and 3 to 4% in 2022, mostly derivatively priced odd lots, which the whitelist exists to exclude; prices under $1 about 1 to 2%; cancellations a tiny share. In November 2021 late-reported odd lots double the off-exchange exclusions, which will show as a dip in retail counts.
+    3. **Every correction pairs with its record** (table): `unpaired` is 0 except on 2015-02-11, whose 28,148 corrections have records on another venue (left as printed, see `explanations/taq_pull.md`, section 10). `record_after_cutoff` counts corrections ignored because they were published after 15:50.
+
+    Codes: `step` items are `raw`, the removals (`records`, `cancelled_or_erroneous`, `sale_condition`, `price_or_size`), `kept` and `restored_original` (corrected trades given back their original print). `ctm` items are the correction codes (`01` corrected, `07` erroneous, `08` cancelled; their records `12`, `11`, `10`), `unmatched` (not found in `wct`), `record_after_cutoff` and `unpaired`.
     """)
     return
 
@@ -277,62 +289,12 @@ def _(audit, mo):
     return
 
 
-@app.cell
-def _(audit, mo):
-    _raw = audit[(audit["section"] == "step") & (audit["item"] == "raw")].groupby("venue")["trades"].sum()
-    _c = audit[audit["section"] == "condition"]
-    _c = (
-        _c.assign(condition=_c["item"].str.replace(" ", "·"))
-        .groupby(["condition", "venue", "kept"])
-        .agg(first_day=("day", "min"), last_day=("day", "max"), days=("day", "nunique"), trades=("trades", "sum"))
-        .reset_index()
-    )
-    _c["% of the venue's raw trades"] = _c["trades"] / _c["venue"].map(_raw) * 100
-    _c["first_day"], _c["last_day"] = _c["first_day"].dt.date, _c["last_day"].dt.date
-    mo.vstack([
-        mo.md("**Every sale-condition string** (spaces shown as ·), by venue (0 exchange, 1 off-exchange) and whether its "
-              "trades were kept. A string can be both: `T` is kept outside the session and excluded inside it."),
-        _c.sort_values("trades", ascending=False),
-    ])
-    return
-
-
-@app.cell
-def _(ALL_DAYS, LogNorm, TRAIN_DAYS, audit, mo, pd, plt):
-    _names = {
-        "A": "NYSE American", "B": "Nasdaq BX", "C": "NYSE National", "D": "FINRA (off-exchange)", "H": "MIAX Pearl",
-        "J": "Cboe EDGA", "K": "Cboe EDGX", "L": "LTSE", "M": "NYSE Chicago", "N": "NYSE", "P": "NYSE Arca",
-        "Q": "Nasdaq (Tape C)", "T": "Nasdaq (Tapes A, B)", "U": "MEMX", "V": "IEX", "X": "Nasdaq PSX", "Y": "Cboe BYX",
-        "Z": "Cboe BZX",
-    }
-    _v = audit[audit["section"] == "venue_code"]
-    _share = _v.pivot_table(index="item", columns="month", values="trades", aggfunc="sum", fill_value=0)
-    _share = _share / _share.sum()
-    _fig, _ax = plt.subplots(figsize=(13, 5))
-    _mesh = _ax.pcolormesh(_share.columns, range(len(_share)), _share.where(_share > 0), norm=LogNorm(1e-6, 1),
-                           shading="nearest")
-    _ax.set_yticks(range(len(_share)), [f"{_code} {_names.get(_code, '')}" for _code in _share.index], fontsize=8)
-    _ax.axvline(pd.Timestamp(ALL_DAYS[len(TRAIN_DAYS)]), color="k", lw=1)
-    _ax.set_title("Each venue code's share of the month's trades (blank: none; line: test period starts)", fontsize=10)
-    _fig.colorbar(_mesh, ax=_ax)
-    _fig.tight_layout()
-
-    _t = _v.groupby("item").agg(first_day=("day", "min"), last_day=("day", "max"), days=("day", "nunique"),
-                                trades=("trades", "sum"))
-    _t["% of all trades"] = _t["trades"] / _t["trades"].sum() * 100
-    _t["% kept"] = _v[_v["kept"]].groupby("item")["trades"].sum().reindex(_t.index, fill_value=0) / _t["trades"] * 100
-    _t["first_day"], _t["last_day"] = _t["first_day"].dt.date, _t["last_day"].dt.date
-    _t.insert(0, "venue", _t.index.map(lambda _code: _names.get(_code, "")))
-    mo.vstack([_fig, _t.round(3)])
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Symbols, PERMNOs and security groups
+    ## 3. Master files and CRSP names
 
-    Every symbol of every day's master file (`data/raw/taq/master/`) linked to a CRSP PERMNO by `dsr.taq_link.link_permnos`, never by ticker: the master's CUSIP against the CUSIP (`cusip9`) of CRSP's name record in force that day (`stocknames_v2`); failing that, a CUSIP used by a single PERMNO in all of CRSP; a symbol missing from a day's master takes its CUSIP from the latest earlier master. The link fixes how the data was recorded and selects nothing by value, so it covers every day. The master's own security type (`sec_type`) exists only from 2016; CRSP's (`securitytype`, `securitysubtype`, `sharetype`) is dated and covers every year.
+    **Purpose:** load the two sources of the symbol-to-PERMNO link: every day's master file (symbol, CUSIP and, from 2016, the master's security type) and CRSP's name history (`stocknames_v2`: for each PERMNO, the CUSIP, ticker and classification in force over each period).
     """)
     return
 
@@ -355,59 +317,233 @@ def _(ALL_DAYS, DATA_DIR, MASTER_DIR, mo, pd, pq):
     return crsp_names, masters
 
 
-@app.cell
-def _(crsp_names, link_permnos, masters, mo, pd):
-    master_links = link_permnos(masters[["day", "symbol"]], masters, crsp_names).merge(
-        masters[["day", "symbol", "sec_type"]].drop_duplicates(["day", "symbol"]), on=["day", "symbol"], how="left"
-    )
-    _by_year = pd.crosstab(master_links["day"].dt.year, master_links["rule"], normalize="index") * 100
-    mo.vstack([
-        mo.md("**How each master symbol-day was linked**, % of the year's symbol-days:"),
-        _by_year.round(2),
-    ])
-    return (master_links,)
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 4. The symbols table
 
+    **Purpose:** one row per WCT day and traded symbol, built once and written to `data/intermediate/taq/symbols.parquet`: its PERMNO, whether it is the PERMNO's primary symbol that day, CRSP's classification and the Tick Size Pilot group. Everything after (the train/test split, the exploration, the features) joins it on day and symbol instead of matching again.
 
-@app.cell
-def _(master_links, mo, pd):
-    _from_2016 = master_links[master_links["day"] >= "2016-01-01"]
-    _types = pd.crosstab(_from_2016["sec_type"].replace("", "blank"), _from_2016["rule"])
-    _types = _types.loc[_types.sum(axis=1).sort_values(ascending=False).index]
-    _common = (
-        _from_2016[(_from_2016["sec_type"] == "A") & _from_2016["permno"].isna()]
-        .groupby(["symbol", "cusip"], dropna=False)["day"].agg(days="size", first="min", last="max")
-        .sort_values("days", ascending=False)
-        .reset_index()
-    )
-    mo.vstack([
-        mo.md("**Master symbol-days by the master's security type and how they were linked**, 2016 onwards (the "
-              "master has no type before): `A` common stock, `H` ADR, `B` preferred, `C` warrant, `R` unit, `D` right, "
-              "`G` structured product, `U` unknown, `P` fund"),
-        _types,
-        mo.md("**Common stocks (`A`) without a PERMNO**, by symbol and CUSIP:"),
-        _common,
-    ])
+    ### 4.1 Traded symbols
+
+    **What we check:** which symbols traded each day (a row in `bars`, any bucket; `daily` misses symbols whose session trades all met crossed or missing quotes), and how many are not in their day's master file under their own name. Most of those are in 2014 to 2016: Nasdaq class shares that the old master writes without the space (`LVNTA` where the trades say `LVNT A`), which the link below handles.
+    """)
     return
 
 
 @app.cell
-def _(master_links, mo):
-    _linked = master_links[master_links["permno"].notna()]
-    _shared = _linked[_linked.groupby(["day", "permno"])["symbol"].transform("size") > 1]
-    _pairs = (
-        _shared.groupby(["permno", "day"])["symbol"].agg(lambda _s: " / ".join(sorted(_s)))
-        .reset_index()
-        .groupby(["permno", "symbol"])["day"].agg(days="size", first="min", last="max")
-        .sort_values("first")
-        .reset_index()
-    )
+def _(ALL_DAYS, masters, mo, per_day):
+    traded = per_day("bars", ["symbol"], lambda d: d.drop_duplicates(), ALL_DAYS)
+    _in_master = traded.merge(masters[["day", "symbol"]].drop_duplicates(), on=["day", "symbol"], how="left", indicator=True)
+    _missing = _in_master[_in_master["_merge"] == "left_only"]
     mo.vstack([
-        mo.md(f"**PERMNOs reached by two symbols on the same day**: {len(_shared):,} symbol-days, "
-              f"{_shared['day'].dt.year.value_counts().sort_index().to_dict()} by year. Mostly a when-issued (`WI`) or "
-              "when-distributed (`WD`) symbol trading next to the regular one, and ticker changes or spin-offs "
-              "listed under both symbols for a day:"),
-        _pairs,
+        mo.md(f"{len(traded):,} traded symbol-days over {traded['day'].nunique():,} days; **{len(_missing):,} are not in "
+              "their day's master file**, by year:"),
+        _missing.groupby(_missing["day"].dt.year).size().rename("symbol-days").to_frame().T.rename(columns=str),
     ])
+    return (traded,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.2 PERMNOs
+
+    **How:** `dsr.taq_link.link_permnos`, never by ticker. The CUSIP comes from the day's master (under the symbol, or written without its space), or else from the latest master in the 5 trading days before (a cap, so a reused ticker cannot take up an old CUSIP); it is matched on its first 8 characters to the CUSIP of CRSP's name record in force that day, or else to a CUSIP used by a single PERMNO in all of CRSP.
+
+    **What we check, and what the output shows:**
+
+    1. **Where each CUSIP comes from:** almost all from the same day's master; about 106,000 symbol-days in 2014 to 2016 only without the space; 3,693 from an earlier master, nearly all one day back (a stock's last trading day, missing from that morning's master); 5,665 from none (SIP test symbols, ETNs). The cap turned away 95 symbol-days looking back 6 to 167 days, none of them in CRSP.
+    2. **How many get a PERMNO:** 87 to 91% of traded symbol-days each year. The rest are preferreds, warrants, units and ETNs, which CRSP does not cover; by trades, about 99% get one.
+    """)
+    return
+
+
+@app.cell
+def _(ALL_DAYS, crsp_names, link_permnos, masters, mo, np, pd, traded):
+    symbol_links = link_permnos(traded, masters, crsp_names)
+    _lag = pd.Series(pd.DatetimeIndex(ALL_DAYS).get_indexer(symbol_links["day"]) - pd.DatetimeIndex(ALL_DAYS).get_indexer(
+        symbol_links["master_day"].fillna(symbol_links["day"])), index=symbol_links.index)
+    symbol_links["cusip_from"] = np.select(
+        [symbol_links["master_day"].isna(), _lag.eq(0) & symbol_links["master_symbol"].ne(symbol_links["symbol"]), _lag.eq(0)],
+        ["no master", "same day, without the space", "same day"], default="earlier master",
+    )
+    symbol_links["master_lag"] = _lag.where(symbol_links["cusip_from"].eq("earlier master"))  # trading days back
+    mo.vstack([
+        mo.md("**Where each traded symbol-day's CUSIP comes from**, symbol-days by year:"),
+        pd.crosstab(symbol_links["day"].dt.year, symbol_links["cusip_from"]).rename(index=str),
+        mo.md("**How it was linked**, % of the year's traded symbol-days:"),
+        (pd.crosstab(symbol_links["day"].dt.year, symbol_links["rule"], normalize="index") * 100).round(2).rename(index=str),
+    ])
+    return (symbol_links,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.3 Primary symbol
+
+    **Purpose:** count each stock once. When two traded symbols map to one PERMNO on a day, only one may carry it.
+
+    **Rule** (`dsr.taq_link.mark_primary`): a symbol alone on its PERMNO that day is primary, whatever its suffix (`MKC V` is McCormick's voting class, not when-issued shares). Among several, the symbols without a when-issued suffix (`WI`, `WD`, `V`: shares of a split, spin-off or new issue trading before they exist, at their own price) are preferred; if two regular ones remain, the one matching CRSP's ticker that day.
+
+    **What we check, and what the output shows:**
+
+    1. **How often two symbols share a PERMNO:** 550 PERMNO-days in 12 years. 539 are a regular symbol next to its when-issued twin.
+    2. **The 11 with two regular symbols** are each a merger's last day (ACE and CB on 2016-01-14, TYC and JCI on 2016-09-02): the master already gives the target's old ticker the acquirer's CUSIP. CRSP's ticker picks the acquirer every time; the target's last-day trades are kept but not primary, so they never reach the acquirer.
+    3. **At most one primary symbol per PERMNO and day** (the cell stops otherwise), and every linked PERMNO-day has one.
+    """)
+    return
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    WHEN_ISSUED_SUFFIXES,
+    class_on,
+    mark_primary,
+    pd,
+    read_name_records,
+    symbol_links,
+):
+    crsp_name_records = read_name_records(DATA_DIR / "raw" / "crsp" / "stocknames_v2.csv")
+    _linked = symbol_links["permno"].notna()
+    crsp_class = class_on(
+        symbol_links.loc[_linked, ["day", "permno"]].astype({"permno": "int64"}).rename(columns={"day": "date"}),
+        crsp_name_records,
+    )  # the name record in force that day, for every linked symbol-day
+    symbol_primary = mark_primary(symbol_links[["day", "symbol", "permno"]].assign(ticker=crsp_class["ticker"]))
+    _primaries = symbol_primary[symbol_primary["permno"].notna()].groupby(["day", "permno"])["primary"].sum()
+    assert _primaries.eq(1).all(), "a linked PERMNO-day has no primary symbol, or two"
+    _linked_rows = symbol_primary[symbol_primary["permno"].notna()]
+    _twin = _linked_rows["symbol"].str.split(" ").str[1].isin(WHEN_ISSUED_SUFFIXES)
+    _n = _linked_rows.assign(twin=_twin).groupby(["day", "permno"]).agg(
+        symbols=("symbol", "size"), twins=("twin", "sum"), primary=("primary", "sum"))
+    _shared = _n["symbols"] > 1
+    pd.DataFrame({"PERMNO-days": [
+        len(_n), _shared.sum(), (_shared & (_n["symbols"] - _n["twins"] == 1)).sum(),
+        (_shared & (_n["symbols"] - _n["twins"] > 1)).sum(), (_n["primary"] == 0).sum(),
+    ]}, index=["linked", "with two symbols", "  a regular symbol and its when-issued twin",
+               "  two regular symbols (decided by CRSP's ticker)", "with no primary symbol"])
+    return crsp_class, symbol_primary
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.4 Classification
+
+    **Purpose:** say what each symbol is, with the definitions both models share.
+
+    - **CRSP's class on the day** (`dsr.crsp`, the same functions as the Robintrack panels): `security_type` (common stock, foreign common stock, ADR, REIT, ETF, closed-end fund, unit, other; unclassified when no name record is in force that day) and `is_common` (share codes 10 and 11). Symbols without a PERMNO have neither.
+    - **The Tick Size Pilot group** (`dsr.taq_link.pilot_groups`): C (control), 1, 2 or 3, from 2016-10-03 to 2018-09-28 only. From 2016-10-31 as that day's master shows it; before, the group the stock's CUSIP shows on 2016-10-31, because the master leaves it blank until 10-21 and shows group 3 stocks as C until each was phased in. FINRA published the assignments before the pilot began. After the pilot the master keeps writing C for former pilot stocks, which means nothing.
+
+    **What we check, and what the output shows:**
+
+    1. **Primary symbols by security type:** about 3,500 common stocks a day, peaking in 2021-2022; ETFs triple from about 1,330 a day to 4,180; foreign common doubles from 2021; under 310 unclassified symbol-days in any year.
+    2. **Pilot group sizes:** in October 2016, 393, 388 and 386 traded stocks in groups 1 to 3 and 1,167 controls (designed: 400 and 1,200), shrinking to about 330 and 1,040 by September 2018 as stocks leave.
+    """)
+    return
+
+
+@app.cell
+def _(
+    PILOT_END,
+    PILOT_START,
+    crsp_class,
+    is_common_stock,
+    masters,
+    mo,
+    pd,
+    pilot_groups,
+    security_type,
+    symbol_links,
+    symbol_primary,
+):
+    _pilot = pilot_groups(masters).rename(columns={"day": "master_day", "symbol": "master_symbol"})
+    symbols = (
+        symbol_primary[["day", "symbol", "permno", "symbols_on_permno", "primary"]]
+        .join(symbol_links[["master_day", "master_symbol", "cusip", "rule"]].rename(columns={"rule": "link_rule"}))
+        .join(pd.DataFrame({"ticker": crsp_class["ticker"], "security_type": security_type(crsp_class),
+                            "is_common": is_common_stock(crsp_class)}))
+        .merge(_pilot[["master_day", "master_symbol", "pilot_group"]].drop_duplicates(["master_day", "master_symbol"]),
+               on=["master_day", "master_symbol"], how="left")
+    )
+    _p = symbols[symbols["primary"]]
+    _in_pilot = _p[_p["day"].between(PILOT_START, PILOT_END)]
+    _per_day = _in_pilot.groupby(["day", "pilot_group"]).size().unstack()
+    mo.vstack([
+        mo.md("**Primary symbols by CRSP security type**, symbol-days by year:"),
+        pd.crosstab(_p["day"].dt.year, _p["security_type"]).rename(index=str),
+        mo.md("**Tick Size Pilot groups**, primary symbols per day (median by month):"),
+        _per_day.groupby(_per_day.index.to_period("M").astype(str)).median().iloc[[0, 1, 6, 12, 18, -1]],
+    ])
+    return (symbols,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.5 Checks and writing the table
+
+    **Purpose:** gate the write. `data/intermediate/taq/symbols.parquet` is written only when every check passes and the button is pressed.
+
+    **What we check:**
+
+    1. One row per day and traded symbol, and every traded symbol has a row.
+    2. Every linked PERMNO-day has exactly one primary symbol, and a primary symbol always has a PERMNO.
+    3. Every day is a pulled WCT day, and pilot groups appear only from 2016-10-03 to 2018-09-28.
+    4. **Coverage** (training days only, since it reads trades and dollars): the share of all trades and dollars that land on a primary symbol with a PERMNO, by year (about 98 to 99%; the rest are preferreds, warrants, ETNs and ADRs CRSP does not carry), and, separately, the share of all trades that are US common stock (about two thirds; the rest is ETFs, foreign stocks, ADRs, REITs and funds). Of the trades in symbols the master calls common stock, 99.97% get a PERMNO.
+    """)
+    return
+
+
+@app.cell
+def _(TRAIN_DAYS, pd, per_day, symbols):
+    _totals = per_day("bars", ["symbol", "trades", "dollars"],
+                       lambda d: d.groupby("symbol", as_index=False)[["trades", "dollars"]].sum(), TRAIN_DAYS)
+    _t = _totals.merge(symbols[["day", "symbol", "primary", "is_common"]].astype({"day": _totals["day"].dtype}),
+                       on=["day", "symbol"], how="left")
+    _t["year"] = _t["day"].dt.year
+    _all = _t.groupby("year")[["trades", "dollars"]].sum()
+    _on = _t[_t["primary"]].groupby("year")[["trades", "dollars"]].sum()
+    _common = _t[_t["primary"] & _t["is_common"]].groupby("year")[["trades", "dollars"]].sum()
+    symbol_coverage = pd.DataFrame({
+        "% trades on a primary PERMNO": _on["trades"] / _all["trades"] * 100,
+        "% dollars on a primary PERMNO": _on["dollars"] / _all["dollars"] * 100,
+        "% of all trades that are US common stock": _common["trades"] / _all["trades"] * 100,
+    }).round(2).rename(index=str)
+    symbol_coverage
+    return
+
+
+@app.cell
+def _(ALL_DAYS, PILOT_END, PILOT_START, mo, pd, symbols, traded):
+    _linked = symbols["permno"].notna()
+    _primaries = symbols[_linked].groupby(["day", "permno"])["primary"].sum()
+    _pilot_days = symbols.loc[symbols["pilot_group"].notna(), "day"]
+    symbol_checks = pd.DataFrame([
+        ("one row per day and traded symbol", not symbols.duplicated(["day", "symbol"]).any()),
+        ("every traded symbol has a row", len(symbols) == len(traded)),
+        ("every linked PERMNO-day has exactly one primary symbol", bool(_primaries.eq(1).all())),
+        ("a primary symbol always has a PERMNO", bool(_linked[symbols["primary"]].all())),
+        ("every day is a pulled WCT day", bool(symbols["day"].dt.strftime("%Y%m%d").isin(ALL_DAYS).all())),
+        ("pilot groups only from 2016-10-03 to 2018-09-28", bool(_pilot_days.between(PILOT_START, PILOT_END).all())),
+    ], columns=["check", "passed"])
+    write_symbols = mo.ui.run_button(label="Write data/intermediate/taq/symbols.parquet")
+    mo.vstack([mo.ui.table(symbol_checks, selection=None), write_symbols])
+    return symbol_checks, write_symbols
+
+
+@app.cell
+def _(DATA_DIR, mo, symbol_checks, symbols, write_symbols):
+    mo.stop(not symbol_checks["passed"].all(), mo.md("**Not written:** a check failed."))
+    mo.stop(not write_symbols.value, mo.md("Press the button to write."))
+    _path = DATA_DIR / "intermediate" / "taq" / "symbols.parquet"
+    _part = _path.with_name(_path.name + ".part")
+    symbols.to_parquet(_part, index=False)
+    _part.rename(_path)
+    mo.md(f"Written: `{_path.relative_to(DATA_DIR.parent)}`, {len(symbols):,} rows, {_path.stat().st_size / 1e6:,.0f} MB")
     return
 
 
