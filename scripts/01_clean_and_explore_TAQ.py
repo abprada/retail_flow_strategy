@@ -30,12 +30,16 @@ def _():
 
     from dsr.crsp import class_on, is_common_stock, read_name_records, security_type
     from dsr.taq_link import PILOT_END, PILOT_START, WHEN_ISSUED_SUFFIXES, link_permnos, mark_primary, pilot_groups
-    from dsr.taq_split import CODES, write_decision_days
+    from dsr.crsp import DAILY_COLUMNS as CRSP_COLUMNS
+    from dsr.taq_split import CAP_MIN, CODES, PRICE_MIN, UNIVERSE_TYPES, stock_days, write_decision_days
 
     return (
+        CAP_MIN,
         CODES,
         PILOT_END,
         PILOT_START,
+        PRICE_MIN,
+        UNIVERSE_TYPES,
         WHEN_ISSUED_SUFFIXES,
         class_on,
         is_common_stock,
@@ -49,6 +53,7 @@ def _():
         pq,
         read_name_records,
         security_type,
+        stock_days,
         write_decision_days,
         xcals,
     )
@@ -431,7 +436,7 @@ def _(
         (_shared & (_n["symbols"] - _n["twins"] > 1)).sum(), (_n["primary"] == 0).sum(),
     ]}, index=["linked", "with two symbols", "  a regular symbol and its when-issued twin",
                "  two regular symbols (decided by CRSP's ticker)", "with no primary symbol"])
-    return crsp_class, symbol_primary
+    return crsp_class, crsp_name_records, symbol_primary
 
 
 @app.cell(hide_code=True)
@@ -556,15 +561,45 @@ def _(DATA_DIR, mo, symbol_checks, symbols, write_symbols):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5. The data by decision day: what is known at 15:50
+    ## 5. The data by decision day: the universe, and what is known at 15:50
 
-    **Purpose:** rewrite the pull so each day's folder holds exactly what is known at that day's 15:50 cutoff, split into train (decision days 2014-01-02 to 2023-12-29) and test (2024-01-02 to 2025-12-31), in `data/intermediate/taq/train/<YYYYMMDD>/` and `test/<YYYYMMDD>/`.
+    **Purpose:** rewrite the pull so each day's folder holds, for the stocks in that day's universe, exactly what is known at its 15:50 cutoff, split into train (decision days 2014-01-02 to 2023-12-29) and test (2024-01-02 to 2025-12-31): `data/intermediate/taq/train/<YYYYMMDD>/` and `test/<YYYYMMDD>/`, three files each.
 
-    **Rule** (`dsr.taq_split`): decision day D holds its own morning piece and session (buckets 0 and 1, to 15:50) and `daily`, and the previous trading day's last 10 minutes and evening piece (buckets 2 and 3, after that day's 15:50). Rows are copied unchanged: nothing is combined, recomputed, added or dropped. Every row of `daily`, `cells` and `bars` gets `traded_day` (the trading day it happened) and its `permno` and `primary` (`symbols.parquet`) from that day, so the previous day's pieces keep that day's PERMNO across a ticker change; each `cells` and `bars` row also gets a readable `piece` (`prev_last10`, `prev_evening`, `pre_open`, `session`), and rows run by symbol and in time order. `data/intermediate/taq/codes.csv` says what every code means (`bucket`, `venue`, `z`, `q`, `spread`, `size`). The overnight bar is glued and empty bars filled later, when features are built. `audit` stays with the pull in `data/raw/taq/pull/`; the next-day returns come with the final clean data. WCT day 2013-12-31 only lends its evening to 2014-01-02; the evening of 2025-12-31 feeds a day outside the sample.
+    **The universe** (`dsr.taq_split.stock_days`), decided per day with what was known the day before: CRSP's security type that day is common stock, foreign common stock, ADR, ETF or REIT; the previous trading day's close is at least $1 (Eaton et al.) and its market cap at least $50M. Nothing about later days is used, so no stock is dropped for a later split or delisting.
 
-    **What we check** (after writing): every row of the pull lands in exactly one decision day, except those two edges; per WCT day and bucket, the rows and trades of `cells` and `bars` are equal before and after; every day of 2014-2023 is in train and every day of 2024-2025 in test; every row's `traded_day` is the decision day (`pre_open`, `session`) or the trading day before (`prev_last10`, `prev_evening`); no stock is counted twice (at most one primary row per PERMNO in each time piece and bar).
+    **The files** (`dsr.taq_split`):
+    - `bars` and `cells`: the rows of the universe stocks' primary symbols: the previous trading day's last 10 minutes and evening, then the day's pre-open and session to 15:50, in time order. Each row has `permno` (the one its symbol had on the day it traded) and `piece`; trade rows are otherwise copied unchanged, counts as integers, prices as exact decimals.
+    - `daily`: one row per universe stock, traded or not: who it is (`symbol`, `security_type`, `is_common`, `pilot_group`), the day (`early_close`), the day before from CRSP (`price_prev`, `cap_prev`, `dollar_volume_prev`, `ret_prev`), today before 15:50 (`open_t`, CRSP's official open, usable when `traded_before_cutoff`; `facprc_t`, the day's split or distribution factor; `spread_bp`), and the target (`ret_next`, close to next close with delisting returns, kept when it spans one trading day; `ret_next_is_delisting`). The last training day's target ends in 2024 and is left empty (the embargo).
+    - `data/intermediate/taq/codes.csv` says what every code means.
+
+    **What we check** (after writing): one `daily` row per stock and day; every `bars` and `cells` stock is in its day's `daily`; every `daily` row meets the universe rule; for the kept stocks, rows and trades equal the pull's, piece by piece; 2014-2023 in train and 2024-2025 in test; no training target reaches into 2024.
     """)
     return
+
+
+@app.cell
+def _(
+    ALL_DAYS,
+    DATA_DIR,
+    TEST_START,
+    crsp_name_records,
+    manifest,
+    mo,
+    pd,
+    stock_days,
+):
+    _crsp_cols = {"dlycaldt": "date", "dlyprc": "price", "dlycap": "cap", "dlyprcvol": "dollar_volume", "dlyret": "ret",
+                  "dlyretdurflg": "ret_span", "dlyopen": "open", "dlyfacprc": "facprc"}
+    _crsp = pd.read_csv(DATA_DIR / "raw" / "crsp" / "stkdlysecuritydata_from_2013.csv", usecols=["permno", *_crsp_cols],
+                        engine="pyarrow").rename(columns=_crsp_cols).assign(date=lambda d: pd.to_datetime(d["date"]))
+    _early = set(manifest.loc[manifest["close"] == "13:00", "day"].dt.strftime("%Y%m%d"))
+    universe = stock_days(_crsp, crsp_name_records, ALL_DAYS, TEST_START, _early)
+    _per_day = universe.groupby(["decision_day", "security_type"]).size().unstack(fill_value=0)
+    mo.vstack([
+        mo.md(f"**The universe:** {len(universe):,} stock-days; stocks per day by security type (median by year):"),
+        _per_day.groupby(_per_day.index.year).median().astype(int).rename(index=str),
+    ])
+    return (universe,)
 
 
 @app.cell
@@ -583,15 +618,18 @@ def _(
     TEST_START,
     mo,
     symbols,
+    universe,
     write_by_decision_day,
     write_decision_days,
 ):
     mo.stop(not write_by_decision_day.value, mo.md("Press the button to write."))
     DECISION_DIR = DATA_DIR / "intermediate" / "taq"
     CODES.to_csv(DECISION_DIR / "codes.csv", index=False)
-    _links = {_d.strftime("%Y%m%d"): _g[["symbol", "permno", "primary"]] for _d, _g in symbols.groupby("day")}
+    _links = {_d.strftime("%Y%m%d"): _g[["symbol", "permno", "primary", "pilot_group"]] for _d, _g in symbols.groupby("day")}
+    _universe = {_d.strftime("%Y%m%d"): _g for _d, _g in universe.groupby("decision_day")}
+    _empty = universe.iloc[0:0]
     decision_days = write_decision_days(
-        PULL_DIR, DECISION_DIR, ALL_DAYS, TEST_START, _links.get,
+        PULL_DIR, DECISION_DIR, ALL_DAYS, TEST_START, _links.get, lambda _day: _universe.get(_day, _empty),
         progress=lambda _pairs: mo.status.progress_bar(_pairs, title="Writing decision days", remove_on_exit=True),
     )
     decision_days.groupby("period").agg(days=("decision_day", "size"), first=("decision_day", "min"), last=("decision_day", "max"))
@@ -601,47 +639,76 @@ def _(
 @app.cell
 def _(
     ALL_DAYS,
+    CAP_MIN,
     DECISION_DIR,
+    PRICE_MIN,
     PULL_DIR,
     TEST_START,
+    UNIVERSE_TYPES,
     decision_days,
     mo,
     np,
     pd,
     pq,
+    symbols,
 ):
-    def _bucket_totals(folder, buckets):
-        """Rows and trades of cells and bars by bucket in one folder."""
-        out = {}
-        for _name in ["cells", "bars"]:
-            _t = pq.read_table(folder / f"{_name}.parquet", columns=["bucket", "trades"]).to_pandas()
-            _t = _t[_t["bucket"].isin(buckets)]
-            out[_name] = _t.groupby("bucket")["trades"].agg(["size", "sum"])
-        return out
-
-
-    _bad, _twice, _wrong_day = [], 0, 0
+    _bad, _orphans, _dups, _outside, _no_trade, _stock_days = [], 0, 0, 0, 0, 0
+    _prim = symbols[symbols["primary"]][["day", "symbol", "permno"]]
+    _prim = {_d.strftime("%Y%m%d"): _g.set_index("symbol")["permno"] for _d, _g in _prim.groupby("day")}
     for _prev, _day, _period in mo.status.progress_bar(
         list(zip(ALL_DAYS[:-1], ALL_DAYS[1:], decision_days["period"])), title="Checking", remove_on_exit=True
     ):
-        _written = _bucket_totals(DECISION_DIR / _period / _day, [0, 1, 2, 3])
-        _own, _before = _bucket_totals(PULL_DIR / _day, [0, 1]), _bucket_totals(PULL_DIR / _prev, [2, 3])
-        _b = pq.read_table(DECISION_DIR / _period / _day / "bars.parquet", columns=["permno", "primary", "bucket", "bar", "traded_day"]).to_pandas()
-        _expect = np.where(_b["bucket"].isin([0, 1]), pd.Timestamp(_day), pd.Timestamp(_prev))
-        _wrong_day += int((_b["traded_day"].to_numpy() != _expect.astype(_b["traded_day"].dtype)).sum())
-        _twice += int(_b[_b["primary"]].duplicated(["permno", "bucket", "bar"]).sum())
+        _folder = DECISION_DIR / _period / _day
+        _d = pq.read_table(_folder / "daily.parquet", columns=["permno", "price_prev", "cap_prev", "security_type",
+                                                               "traded_before_cutoff"]).to_pandas()
+        _dups += int(_d["permno"].duplicated().sum())
+        _outside += int((~(_d["price_prev"].abs().ge(PRICE_MIN) & _d["cap_prev"].ge(CAP_MIN)
+                           & _d["security_type"].isin(UNIVERSE_TYPES))).sum())
+        _no_trade += int((~_d["traded_before_cutoff"]).sum())
+        _stock_days += len(_d)
+        _in = set(_d["permno"])
         for _name in ["cells", "bars"]:
-            if not _written[_name].sort_index().equals(pd.concat([_before[_name], _own[_name]]).sort_index()):
+            _w = pq.read_table(_folder / f"{_name}.parquet", columns=["permno", "piece", "trades"]).to_pandas()
+            _orphans += int((~_w["permno"].isin(_in)).sum())
+            _written = _w.groupby("piece")["trades"].agg(["size", "sum"])
+            _expected = []
+            for _src, _buckets, _pieces in [(_prev, [2, 3], {2: "prev_last10", 3: "prev_evening"}),
+                                            (_day, [0, 1], {0: "pre_open", 1: "session"})]:
+                _p = pq.read_table(PULL_DIR / _src / f"{_name}.parquet", columns=["symbol", "bucket", "trades"]).to_pandas()
+                _p = _p[_p["bucket"].isin(_buckets) & _p["symbol"].map(_prim.get(_src, pd.Series(dtype="Int64"))).isin(_in)]
+                _expected.append(_p.assign(piece=_p["bucket"].map(_pieces)).groupby("piece")["trades"].agg(["size", "sum"]))
+            if not _written.sort_index().equals(pd.concat(_expected).sort_index()):
                 _bad.append((_day, _name))
+    _last_train = DECISION_DIR / "train" / ALL_DAYS[ALL_DAYS.index(TEST_START) - 1] / "daily.parquet"
     decision_checks = pd.DataFrame([
         ("one folder per decision day, 2014-01-02 to 2025-12-31", list(decision_days["decision_day"]) == ALL_DAYS[1:]),
         ("2014-2023 in train, 2024-2025 in test", bool((decision_days["period"] == np.where(
             decision_days["decision_day"] < TEST_START, "train", "test")).all())),
-        ("rows and trades of cells and bars equal the pull's, per WCT day and bucket", not _bad),
-        ("every row's traded_day is the decision day (pre_open, session) or the day before (prev_last10, prev_evening)", _wrong_day == 0),
-        ("no stock counted twice: at most one primary row per PERMNO in each time piece and bar", _twice == 0),
+        ("one daily row per stock and day", _dups == 0),
+        ("every daily row meets the universe rule", _outside == 0),
+        ("every bars and cells stock is in its day's daily", _orphans == 0),
+        ("for the kept stocks, rows and trades equal the pull's, piece by piece", not _bad),
+        ("no training target reaches into 2024", bool(pd.read_parquet(_last_train)["ret_next"].isna().all())),
     ], columns=["check", "passed"])
-    decision_checks
+    mo.vstack([decision_checks, mo.md(f"{_stock_days:,} stock-days; {_no_trade:,} ({_no_trade / _stock_days:.2%}) "
+                                      "without a trade before 15:50")])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 6. Training cleaning
+
+    **Purpose:** look at the training days (`data/intermediate/taq/train/`, decision days 2014-01-02 to 2023-12-29) and decide what still needs cleaning before features are built. Every rule found here is chosen on training days only, written as tested code, and applied unchanged to the test days when features are built. The test folder stays closed.
+
+    **Questions, in order:**
+
+    1. **Bad prints:** are there broken prices (highs or lows far from the close and the quote), and does any feature need a rule for them?
+    2. **The Tick Size Pilot (2016-10 to 2018-09):** do the pilot stocks' retail counts work as they are, or do they need the half-cent rule or masking?
+    3. **Retail measures over time:** do the sub-penny (BJZZ) and midpoint rules behave sensibly, including around fractional shares (2021-02-16) and the late reports of November 2021?
+    4. **Usable stocks:** how many stocks trade enough each day to be usable, as input to the universe.
+    """)
     return
 
 
