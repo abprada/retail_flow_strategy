@@ -1,6 +1,6 @@
 """Download the TAQ pull's finished days from WRDS Cloud to this computer, check them, and free their space on WRDS.
 
-    uv run python scripts/wrds_cloud/download.py [--streams 4] [--every 10] [--delete-remote] [--once]
+    uv run python scripts/wrds_cloud/download.py [--days-file days.txt] [--streams 4] [--every 10] [--delete-remote] [--once]
 
 Needs one SSH connection that later commands share, so that WRDS asks for the password and Duo only once. Add to
 ~/.ssh/config on this computer:
@@ -14,17 +14,20 @@ Needs one SSH connection that later commands share, so that WRDS asks for the pa
 
 then open it once with `ssh -fN wrds` (password + Duo). Every `ssh wrds` and `rsync` after that reuses it, for 24 hours.
 
-Each round (every --every minutes until every trading day is here, or once with --once):
+Each round (every --every minutes until every day asked for is here, made by the current code version, or once with
+--once; the days asked for are every trading day, or those in --days-file, one YYYY-MM-DD per line):
   1. lists the finished days on WRDS (folders YYYYMMDD in the output folder; .part folders are still being written) and
      copies the jobs' manifests;
-  2. downloads the days not yet here with rsync, in --streams transfers at once;
+  2. downloads the days not yet here from the current code version with rsync, in --streams transfers at once (a day
+     pulled again replaces the one here);
   3. checks each new day: the four tables open, the conservation checks pass (src/dsr/taq.py), and the row counts
      equal those the job recorded in its manifest; a day that fails is downloaded again next round;
-  4. records the checked days in downloaded.csv and, with --delete-remote, deletes them from WRDS scratch (500 GB
+  4. records the checked days and their code version in downloaded.csv and, with --delete-remote, deletes them from
+     WRDS scratch (500 GB
      shared by the institution, emptied after 7 days), only after the check passed.
 
 Output (gitignored): data/intermediate/taq/by_wct_day/<YYYYMMDD>/ (one folder per WCT day, as the job wrote it),
-    manifests/ (the jobs' manifests), downloaded.csv (the checked days).
+    manifests/ (the jobs' manifests), downloaded.csv (the checked days: day, version, checked_at).
 """
 
 import argparse
@@ -99,6 +102,7 @@ def check(ymd: str, close: str, expected: dict | None) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--host", default="wrds", help="the SSH host alias (see above)")
+    parser.add_argument("--days-file", type=Path, help="one YYYY-MM-DD per line (default: every trading day)")
     parser.add_argument("--remote", default="/scratch/mit/abprada/taq_out")
     parser.add_argument("--streams", type=int, default=4)
     parser.add_argument("--every", type=float, default=10, help="minutes between rounds")
@@ -110,16 +114,22 @@ def main() -> None:
         raise SystemExit(f"no shared SSH connection to {args.host}: run `ssh -fN {args.host}` first (password + Duo)")
     with open(DAYS) as f:
         closes = {r["date"].replace("-", ""): r["close"] for r in csv.DictReader(f)}
+    wanted = set(closes)
+    if args.days_file:
+        wanted = {d.strip().replace("-", "") for d in args.days_file.read_text().split()}
+        if wanted - set(closes):
+            raise SystemExit(f"not trading days: {sorted(wanted - set(closes))[:5]}")
     LOCAL.mkdir(parents=True, exist_ok=True)
     (LOCAL / "manifests").mkdir(exist_ok=True)
     log = LOCAL / "downloaded.csv"
-    done = set(pd.read_csv(log, dtype=str)["day"]) if log.exists() else set()
-    print(f"code version {VERSION}; {len(done):,} of {len(closes):,} days already here", flush=True)
+    logged = pd.read_csv(log, dtype=str) if log.exists() else pd.DataFrame(columns=["day", "version"])
+    done = set(logged.loc[logged["version"] == VERSION, "day"]) & wanted
+    print(f"code version {VERSION}; {len(done):,} of {len(wanted):,} days already here", flush=True)
 
     while True:
         start = time.perf_counter()
         listing = ssh(args.host, f"ls -1 {args.remote}").split()
-        finished = sorted(n for n in listing if re.fullmatch(r"\d{8}", n) and n in closes)
+        finished = sorted(n for n in listing if re.fullmatch(r"\d{8}", n) and n in wanted)
         manifests = [n for n in listing if n.startswith("manifest") and n.endswith(".csv")]
         if manifests:
             rsync(args.host, args.remote, manifests, LOCAL / "manifests")
@@ -139,7 +149,8 @@ def main() -> None:
                 else:
                     checked.append(ymd)
             if checked:
-                pd.DataFrame({"day": checked, "checked_at": pd.Timestamp.now().isoformat(timespec="seconds")}).to_csv(
+                pd.DataFrame({"day": checked, "version": VERSION,
+                              "checked_at": pd.Timestamp.now().isoformat(timespec="seconds")}).to_csv(
                     log, mode="a", header=not log.exists(), index=False)
                 done |= set(checked)
                 if args.delete_remote:
@@ -151,10 +162,10 @@ def main() -> None:
             seconds = time.perf_counter() - start
             print(f"{time.strftime('%H:%M')}: {len(checked)} days downloaded and checked ({mb:,.0f} MB in {seconds:.0f} s, "
                   f"{mb / max(seconds, 1):.1f} MB/s){', deleted from WRDS' if args.delete_remote and checked else ''}; "
-                  f"{len(done):,} of {len(closes):,} days here", flush=True)
+                  f"{len(done):,} of {len(wanted):,} days here", flush=True)
         else:
-            print(f"{time.strftime('%H:%M')}: nothing new; {len(done):,} of {len(closes):,} days here", flush=True)
-        if args.once or len(done) >= len(closes):
+            print(f"{time.strftime('%H:%M')}: nothing new; {len(done):,} of {len(wanted):,} days here", flush=True)
+        if args.once or len(done) >= len(wanted):
             break
         time.sleep(args.every * 60)
 

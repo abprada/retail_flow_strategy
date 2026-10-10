@@ -1,12 +1,17 @@
 """Split the full TAQ pull into SGE jobs of equal size, and write their job scripts into the WRDS Cloud bundle.
 
-    uv run python scripts/wrds_cloud/plan_jobs.py [--jobs 5]
+    uv run python scripts/wrds_cloud/plan_jobs.py [--jobs 5] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+                                                  [--days-file days.txt --first-job 6]
 
 WRDS Cloud allows a user 10 batch slots and 150 GB of memory at once (explanations/TAQ/wrds_cloud.md); a job takes 2
 slots, so 5 jobs of 30 GB (m_mem_free is per slot: 15 GB x 2) use both limits fully. Days are weighted by the size of
 their raw trades (the typical day of their year, from the coverage check and the pilot), so each job gets about the
 same amount of work, not the same number of days. Within every job the days run in order of priority, so the most
 useful years arrive first: 2018-05 to 2020-08 (Robintrack, Model 1), then 2020-09 to 2025, then 2014 to 2018-04.
+
+With --from and --to, only the days in that range; with --days-file, only the days listed (one YYYY-MM-DD per line):
+for pulling some days again after a change to the query. With --first-job k > 1 the jobs are numbered from k, the
+existing job files are kept, and the submit script is submit_<k>_<last>.sh, so jobs still running are not touched.
 
 Writes, into scripts/wrds_cloud/jobs/ (and the bundle, when it is rebuilt):
     days_<k>.txt     the days of job k, in the order it runs them
@@ -41,7 +46,7 @@ python3 taq_cloud_day.py --work /scratch/mit/$USER/taq_work --out /scratch/mit/$
 """
 
 SUBMIT = """#!/bin/bash
-# Submit every job of the TAQ pull. Run from ~/taq (qsub fails on absolute paths on WRDS): bash jobs/submit_all.sh
+# Submit jobs {ks} of the TAQ pull. Run from ~/taq on WRDS Cloud (qsub fails on absolute paths there).
 mkdir -p /scratch/mit/$USER/taq_logs
 for k in {ks}; do qsub jobs/job_$k.sh; done
 qstat
@@ -59,10 +64,20 @@ def priority(day: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--jobs", type=int, default=5)
-    n = parser.parse_args().jobs
+    parser.add_argument("--from", dest="start", default="0000-00-00")
+    parser.add_argument("--to", dest="end", default="9999-99-99")
+    parser.add_argument("--days-file", type=Path)
+    parser.add_argument("--first-job", type=int, default=1)
+    args = parser.parse_args()
+    n, first = args.jobs, args.first_job
 
     with open(HERE / "days.csv") as f:
-        days = [r["date"] for r in csv.DictReader(f)]
+        days = [r["date"] for r in csv.DictReader(f) if args.start <= r["date"] <= args.end]
+    if args.days_file:
+        listed = set(args.days_file.read_text().split())
+        if listed - set(days):
+            raise SystemExit(f"not trading days in range: {sorted(listed - set(days))[:5]}")
+        days = [d for d in days if d in listed]
     order = sorted(days, key=lambda d: (priority(d), d))
     jobs: list[list[str]] = [[] for _ in range(n)]
     load = [0.0] * n
@@ -72,13 +87,15 @@ def main() -> None:
         load[k] += GB_PER_DAY[day[:4]]
 
     OUT.mkdir(exist_ok=True)
-    for old in OUT.glob("*"):
-        old.unlink()
-    for k, (job, gb) in enumerate(zip(jobs, load), start=1):
+    if first == 1:
+        for old in OUT.glob("*"):
+            old.unlink()
+    for k, (job, gb) in enumerate(zip(jobs, load), start=first):
         (OUT / f"days_{k}.txt").write_text("\n".join(job) + "\n")
         (OUT / f"job_{k}.sh").write_text(JOB.format(k=k, n=n, days=len(job), gb=gb, first=job[0], mem=MEMORY_PER_SLOT_GB))
         print(f"job {k}: {len(job):,} days, ~{gb:,.0f} GB of raw trades, ~{gb * SECONDS_PER_GB / 3600:.1f} hours")
-    (OUT / "submit_all.sh").write_text(SUBMIT.format(ks=" ".join(str(k) for k in range(1, n + 1))))
+    submit = "submit_all.sh" if first == 1 else f"submit_{first}_{first + n - 1}.sh"
+    (OUT / submit).write_text(SUBMIT.format(ks=" ".join(str(k) for k in range(first, first + n))))
     total = sum(load)
     print(f"all: {len(days):,} days, ~{total / 1000:.1f} TB of raw trades; with {n} jobs at once about "
           f"{max(load) * SECONDS_PER_GB / 3600:.1f} hours")

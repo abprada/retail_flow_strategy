@@ -53,15 +53,14 @@ def run(conn, date: str) -> pd.DataFrame:
     ymd = date.replace("-", "")
     out = OUT / ymd
     out.mkdir(parents=True, exist_ok=True)
-    day = day_parameters(date, has_nano=has_column(conn, f"wct_{ymd}", "time_m_nano"),
-                         has_tr_id=has_column(conn, f"ctm_{ymd}", "tr_id"))
+    day = day_parameters(date, has_nano=has_column(conn, f"wct_{ymd}", "time_m_nano"))
     temp_tables = not read_only(conn)
     conn.rollback()
     sql = day_sql(Dialect("postgres"), day, temp_tables=temp_tables)
     text = ";\n\n".join([*sql["setup"], *(sql[name] for name in KEYS)]) + ";\n"
     version = hashlib.sha1(text.encode()).hexdigest()[:12]
     (out / "query.sql").write_text(f"-- query version {version}\n-- {day}\n{text}")
-    print(f"{date}: close {day.close_ns // 3_600_000_000_000}h, nanoseconds {day.has_nano}, trade IDs {day.has_tr_id}, "
+    print(f"{date}: close {day.close_ns // 3_600_000_000_000}h, nanoseconds {day.has_nano}, "
           f"version {version}, {'temporary tables' if temp_tables else 'read-only: one statement per table'}", flush=True)
 
     start = time.perf_counter()

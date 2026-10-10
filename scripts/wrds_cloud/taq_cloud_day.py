@@ -47,7 +47,7 @@ NS = 10**9
 WCT_COLUMNS = ["sym_root", "sym_suffix", "time_m", "time_m_nano", "ex", "tr_scond", "price", "size", "tr_seqnum",
                "nbb", "nbo"]
 CTM_COLUMNS = ["sym_root", "sym_suffix", "time_m", "time_m_nano", "ex", "tr_scond", "price", "size", "tr_seqnum",
-               "tr_corr", "tr_id"]
+               "tr_corr"]
 MANIFEST_FIELDS = ["day", "version", "job", "close", "has_nano", "has_tr_id", "wct_rows_mb", "ctm_rows_mb",
                    "pull_seconds", "compute_seconds", "daily_rows", "cells_rows", "bars_rows", "audit_rows", "out_mb",
                    "checks_passed"]
@@ -197,7 +197,7 @@ def compute(args, date: str, close: str, version: str) -> bool:
     hours, minutes = map(int, close.split(":"))
     close_ns = (hours * 3600 + minutes * 60) * NS
     day = Day(ymd=ymd, open_ns=(9 * 3600 + 30 * 60) * NS, cutoff_ns=close_ns - 600 * NS, close_ns=close_ns,
-              has_nano=meta["has_nano"], has_tr_id=meta["has_tr_id"])
+              has_nano=meta["has_nano"])
     sql = day_sql(Dialect("duckdb", local_dir=str(raw), local_format="csv"), day, temp_tables=True)
 
     part = args.out / f"{ymd}.part"
@@ -229,7 +229,7 @@ def compute(args, date: str, close: str, version: str) -> bool:
     part.rename(final)
     passed = bool(checks["passed"].all())
     row = {"day": date, "version": version, "job": args.job, "close": close, "has_nano": day.has_nano,
-           "has_tr_id": day.has_tr_id, "wct_rows_mb": meta["wct_rows_mb"], "ctm_rows_mb": meta["ctm_rows_mb"],
+           "has_tr_id": meta["has_tr_id"], "wct_rows_mb": meta["wct_rows_mb"], "ctm_rows_mb": meta["ctm_rows_mb"],
            "pull_seconds": meta["pull_seconds"], "compute_seconds": round(compute_seconds, 1),
            **{f"{name}_rows": len(tables[name]) for name in KEYS},
            "out_mb": round(sum(p.stat().st_size for p in final.glob("*.parquet")) / 1e6, 1), "checks_passed": passed}

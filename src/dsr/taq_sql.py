@@ -25,7 +25,6 @@ class Day:
     cutoff_ns: int
     close_ns: int
     has_nano: bool  # wct and ctm have time_m_nano (from 2016)
-    has_tr_id: bool  # ctm has tr_id (from 2016)
 
 
 class Dialect:
@@ -90,22 +89,21 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
     key = ["sym_root", "sym_suffix", "ex", "seq", "t"]
     on = lambda a, b: " AND ".join(f"{a}.{k} = {b}.{k}" for k in key)
     cut, close, open_ = day.cutoff_ns, day.close_ns, day.open_ns
-    tr_id = f", {'tr_id' if day.has_tr_id else 'NULL'} AS tr_id"
 
-    ctm = _typed(d, 'ctm', day, ', tr_corr' + tr_id)
-    if day.has_tr_id:  # pair each flagged trade with its record, on symbol, venue and trade ID
-        pairs = f"""
-        SELECT o.*, r.t AS t_record, r.price AS price_r, r.size AS size_r, r.cond AS cond_r,
-               (o.t >= {cut}) OR COALESCE(r.t < {cut}, FALSE) AS record_counts, r.t IS NOT NULL AS paired
-        FROM ctm_f o LEFT JOIN ctm_f r
-          ON r.tr_corr IN ('10', '11', '12') AND o.sym_root = r.sym_root AND o.sym_suffix = r.sym_suffix
-             AND o.ex = r.ex AND o.tr_id = r.tr_id
+    ctm = _typed(d, 'ctm', day, ', tr_corr')
+    # Each flagged trade is paired with its record (08 with 10, 07 with 11, 01 with 12) on symbol, venue and sequence
+    # number, which the record repeats in every year. Trade IDs cannot be used: ctm has none before 2016, and they are
+    # empty on most flagged rows until 2017-11-03. Should a key have several records, the first published counts. A
+    # trade without a record is left as wct has it.
+    pairs = f"""
+        SELECT o.*, r.t AS t_record, r.price AS price_r, r.size AS size_r, r.cond AS cond_r, r.t IS NOT NULL AS paired,
+               r.t IS NOT NULL AND (o.t >= {cut} OR r.t < {cut}) AS record_counts
+        FROM ctm_f o LEFT JOIN (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY sym_root, sym_suffix, ex, seq, tr_corr ORDER BY t) AS nth
+            FROM ctm_f WHERE tr_corr IN ('10', '11', '12')
+        ) r ON r.nth = 1 AND r.tr_corr = CASE o.tr_corr WHEN '08' THEN '10' WHEN '07' THEN '11' ELSE '12' END
+               AND o.sym_root = r.sym_root AND o.sym_suffix = r.sym_suffix AND o.ex = r.ex AND o.seq = r.seq
         WHERE o.tr_corr IN ('01', '07', '08')"""
-    else:  # 2014 and 2015: no trade IDs, so every record counts (the end-of-day view)
-        pairs = """
-        SELECT o.*, CAST(NULL AS BIGINT) AS t_record, o.price AS price_r, o.size AS size_r, o.cond AS cond_r,
-               TRUE AS record_counts, TRUE AS paired
-        FROM ctm_f o WHERE o.tr_corr IN ('01', '07', '08')"""
 
     keys = ", ".join(key)
     normal, extended = d.full_match("cond", "[ @IF]*"), d.full_match("cond", "[ @IFTU]*")
@@ -119,7 +117,8 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
             SELECT {keys}, 'cancelled_or_erroneous', NULL, NULL, NULL FROM pairs
             WHERE tr_corr IN ('07', '08') AND record_counts
             UNION ALL
-            SELECT {keys}, 'restore', price_r, size_r, cond_r FROM pairs WHERE tr_corr = '01' AND NOT record_counts
+            SELECT {keys}, 'restore', price_r, size_r, cond_r FROM pairs
+            WHERE tr_corr = '01' AND paired AND NOT record_counts
         ),
         r AS (
             SELECT w.symbol, w.sym_root, w.sym_suffix, w.ex, w.t, w.seq, w.nbb, w.nbo,
@@ -278,7 +277,7 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
             "bars": f"{prefix}, f AS ({bars_f}) {bars}", "audit": f"{prefix} {audit}"}
 
 
-def day_parameters(date: str, has_nano: bool, has_tr_id: bool, cutoff_offset_minutes: int = 10) -> Day:
+def day_parameters(date: str, has_nano: bool, cutoff_offset_minutes: int = 10) -> Day:
     """A day's parameters from NYSE's calendar: the open at 09:30, the close (16:00 or 13:00) and the cutoff before it."""
     import exchange_calendars as xcals
 
@@ -286,4 +285,4 @@ def day_parameters(date: str, has_nano: bool, has_tr_id: bool, cutoff_offset_min
     close = xcals.get_calendar("XNYS").session_close(date).tz_convert("America/New_York")
     close_ns = int((close - close.normalize()).total_seconds()) * ns
     return Day(ymd=date.replace("-", ""), open_ns=(9 * 3600 + 30 * 60) * ns, cutoff_ns=close_ns - cutoff_offset_minutes * 60 * ns,
-               close_ns=close_ns, has_nano=has_nano, has_tr_id=has_tr_id)
+               close_ns=close_ns, has_nano=has_nano)

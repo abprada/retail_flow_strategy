@@ -1,5 +1,5 @@
 #!/bin/bash
-# TAQ pull, job 4 of 5: 603 days, about 2,005 GB of raw trades (2018-05-04 first). Written by plan_jobs.py.
+# TAQ pull, job 4 of 5: 194 days, about 353 GB of raw trades (2014-01-06 first). Written by plan_jobs.py.
 #$ -N taq_4
 #$ -cwd
 #$ -j y

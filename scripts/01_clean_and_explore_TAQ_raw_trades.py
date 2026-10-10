@@ -273,7 +273,7 @@ def _(mo):
     mo.md(r"""
     ## Step 1: corrected and cancelled trades, as known at the cutoff
 
-    WCT has no correction flag, so the flagged trades come from the trade file (`ctm_corrections.parquet`). Each flagged trade (`08` later cancelled, `07` later erroneous, `01` later corrected) has a record published later (`10`, `11` or `12`), paired on symbol, venue and trade ID. A record carries its own time: when the cancellation or correction was published.
+    WCT has no correction flag, so the flagged trades come from the trade file (`ctm_corrections.parquet`). Each flagged trade (`08` later cancelled, `07` later erroneous, `01` later corrected) has a record published later (`10`, `11` or `12`), paired on symbol, venue and sequence number (`tr_seqnum`), which the record repeats. Trade IDs (`tr_id`) are not used: they are missing before 2016 and empty on most flagged rows until 2017-11-03. A record carries its own time: when the cancellation or correction was published.
 
     A record counts for a trade only if it was public before the cutoff of the day the trade feeds:
     - a trade before today's 15:50 feeds today, so a record published at or after 15:50 is ignored. The trade stays as it was printed, at its original price;
@@ -292,11 +292,14 @@ def _(mo):
 @app.cell
 def _(RAW_DIR, SESSION, c0_counts, c0_trades, count_step, pd, typed):
     _TRADE_KEY = ["sym_root", "sym_suffix", "ex", "tr_seqnum", "t_ns"]
-    _PAIR_KEY = ["sym_root", "sym_suffix", "ex", "tr_id"]
+    _PAIR_KEY = ["sym_root", "sym_suffix", "ex", "tr_seqnum", "record_code"]
+    _RECORD_CODE = {"08": "10", "07": "11", "01": "12"}  # flagged trade -> its record
 
     c1_corrections = typed(pd.read_parquet(RAW_DIR / "ctm_corrections.parquet"))
-    _orig = c1_corrections[c1_corrections["tr_corr"].isin(["01", "07", "08"])]
-    _rec = c1_corrections[c1_corrections["tr_corr"].isin(["10", "11", "12"])]
+    _orig = c1_corrections[c1_corrections["tr_corr"].isin(_RECORD_CODE)]
+    _orig = _orig.assign(record_code=_orig["tr_corr"].map(_RECORD_CODE))
+    _rec = c1_corrections[c1_corrections["tr_corr"].isin(_RECORD_CODE.values())]
+    _rec = _rec.assign(record_code=_rec["tr_corr"])
     c1_pairs = _orig.merge(
         _rec[_PAIR_KEY + ["t_ns", "price", "size", "tr_scond"]], on=_PAIR_KEY, how="left",
         suffixes=("", "_record"), validate="one_to_one",

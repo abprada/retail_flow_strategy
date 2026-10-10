@@ -78,7 +78,7 @@ def main() -> None:
             load(conn, f"wct_{YMD}", RAW / "wct.parquet", RAW / "wct_columns.csv")
             print(f"loaded ({time.time() - t0:.0f} s)", flush=True)
 
-        day = day_parameters(DATE, has_nano=True, has_tr_id=True)
+        day = day_parameters(DATE, has_nano=True)
         read_only = "--read-only" in sys.argv
         if read_only:
             with conn.cursor() as cur:

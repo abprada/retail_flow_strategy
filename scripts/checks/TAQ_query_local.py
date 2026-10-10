@@ -32,7 +32,7 @@ NS = 10**9
 
 def main() -> None:
     t0 = time.time()
-    day = day_parameters(DATE, has_nano=True, has_tr_id=True)
+    day = day_parameters(DATE, has_nano=True)
     sql = day_sql(Dialect("duckdb", local_dir=str(RAW)), day, temp_tables="--cte" not in sys.argv)
     con = duckdb.connect()
     if "--limited" in sys.argv:  # the WRDS Cloud job's limits
