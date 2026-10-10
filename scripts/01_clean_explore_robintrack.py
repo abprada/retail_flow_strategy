@@ -23,7 +23,21 @@ def _():
     import numpy as np
     import pandas as pd
 
-    return groupby, mo, np, pd, plt
+    from dsr.crsp import DAILY_COLUMNS, ONE_TRADING_DAY_SPANS, class_on, is_common_stock, read_name_records, security_type
+
+    return (
+        DAILY_COLUMNS,
+        ONE_TRADING_DAY_SPANS,
+        class_on,
+        groupby,
+        is_common_stock,
+        mo,
+        np,
+        pd,
+        plt,
+        read_name_records,
+        security_type,
+    )
 
 
 @app.cell
@@ -1383,52 +1397,30 @@ def _(mo):
 
 
 @app.cell
-def _(ALL_TRADING_DAYS, CRSP_NAMES_PATH, TRADING_DAYS, pd, t2_change):
-    _names = {
-        "dlyret": "ret", "dlyretx": "retx", "dlyretdurflg": "ret_span", "dlyprc": "price", "dlyprcflg": "price_flag",
-        "dlyopen": "open", "dlyhigh": "high", "dlylow": "low", "dlyclose": "close", "dlyvol": "volume",
-        "dlyprcvol": "dollar_volume", "dlycap": "cap", "dlydelflg": "delisted",
-    }
+def _(ALL_TRADING_DAYS, CRSP_NAMES_PATH, DAILY_COLUMNS, TRADING_DAYS, pd, t2_change):
     # the file runs from 2013 (for the TAQ sample); the panels only join the Robintrack period and the trading day on
     # each side of it (the previous-day and next-day columns)
     _first = ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_loc(TRADING_DAYS[0]) - 1]
     _last = ALL_TRADING_DAYS[ALL_TRADING_DAYS.get_loc(TRADING_DAYS[-1]) + 1]
     crsp_daily = pd.read_csv(
-        CRSP_NAMES_PATH.parent / "stkdlysecuritydata_from_2013.csv", usecols=["permno", "dlycaldt", *_names], engine="pyarrow"
-    ).rename(columns={"dlycaldt": "date", **_names})
+        CRSP_NAMES_PATH.parent / "stkdlysecuritydata_from_2013.csv", usecols=["permno", "dlycaldt", *DAILY_COLUMNS],
+        engine="pyarrow",
+    ).rename(columns={"dlycaldt": "date", **DAILY_COLUMNS})
     crsp_daily["date"] = pd.to_datetime(crsp_daily["date"])
     crsp_daily = crsp_daily[crsp_daily["permno"].isin(set(t2_change["permno"])) & crsp_daily["date"].between(_first, _last)]
-
-    # CRSP return spans of one trading day: D1 to D4 by calendar days, DU for long closures, DD for a delisting return
-    ONE_TRADING_DAY_SPANS = r"D[1-4UD]"
-    return ONE_TRADING_DAY_SPANS, crsp_daily
+    return (crsp_daily,)
 
 
 @app.cell
-def _(CRSP_NAMES_PATH, pd):
-    crsp_name_records = pd.read_csv(
-        CRSP_NAMES_PATH,
-        usecols=["permno", "namedt", "nameenddt", "securitytype", "securitysubtype", "sharetype", "usincflg", "issuertype", "primaryexch"],
-        parse_dates=["namedt", "nameenddt"],
-    ).sort_values("namedt")
+def _(CRSP_NAMES_PATH, class_on, read_name_records):
+    crsp_name_records = read_name_records(CRSP_NAMES_PATH)
 
 
     def crsp_class_on(df):
         """The CRSP name record in force on each row's date, aligned to df's index; missing when no record covers the date."""
-        cls = pd.merge_asof(
-            df[["permno", "date"]].reset_index().sort_values("date"), crsp_name_records, left_on="date", right_on="namedt", by="permno"
-        )
-        return cls[cls["date"] <= cls["nameenddt"]].set_index("index").reindex(df.index)
+        return class_on(df, crsp_name_records)
 
-
-    def is_common_stock(cls):
-        """Common stock, CRSP share code 10 or 11: equity, common, ordinary shares, US-incorporated, issued by a corporation."""
-        return (
-            cls["securitytype"].eq("EQTY") & cls["securitysubtype"].eq("COM") & cls["sharetype"].eq("NS")
-            & cls["usincflg"].eq("Y") & cls["issuertype"].eq("CORP")
-        ).fillna(False).astype(bool)
-
-    return crsp_class_on, is_common_stock
+    return (crsp_class_on,)
 
 
 @app.cell(hide_code=True)
@@ -1923,7 +1915,7 @@ def _(
     crsp_daily,
     holder_change_features,
     is_common_stock,
-    np,
+    security_type,
     t1_count,
     t2_change,
     t2_pct,
@@ -1958,21 +1950,7 @@ def _(
     _cls = crsp_class_on(_r)
     _r["is_common"] = is_common_stock(_cls)
     # security type from the same classification, for choosing a universe later
-    _is_com = _cls["securitytype"].eq("EQTY") & _cls["securitysubtype"].eq("COM")
-    _r["security_type"] = np.select(
-        [
-            _is_com & _cls["issuertype"].eq("REIT"),
-            _is_com & _cls["sharetype"].eq("UG"),
-            _is_com & _cls["sharetype"].eq("AD") & _cls["issuertype"].eq("CORP"),
-            _is_com & _cls["sharetype"].eq("NS") & _cls["issuertype"].eq("CORP") & _cls["usincflg"].eq("Y"),
-            _is_com & _cls["sharetype"].eq("NS") & _cls["issuertype"].eq("CORP") & _cls["usincflg"].eq("N"),
-            _cls["securitytype"].eq("FUND") & _cls["securitysubtype"].eq("ETF"),
-            _cls["securitytype"].eq("FUND") & _cls["securitysubtype"].eq("CEF"),
-            _cls["securitytype"].isna(),
-        ],
-        ["REIT", "unit", "ADR", "common stock", "foreign common stock", "ETF", "closed-end fund", "unclassified"],
-        default="other",
-    )
+    _r["security_type"] = security_type(_cls)
 
     returns_panel = _r.sort_values(["permno", "date"]).reset_index(drop=True)
     FEATURES_AT_1550 = ["rh_pct_lag1", *HOLDER_CHANGE_FEATURES]
