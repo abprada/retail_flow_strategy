@@ -141,3 +141,11 @@ def test_writer_puts_each_day_in_its_period_and_resumes(tmp_path):
     assert first[["decision_day", "period"]].values.tolist() == [[D1, "train"], [D2, "test"]]
     assert (out / "test" / D2 / "daily.parquet").exists()
     assert write_decision_days(pull, out, [D0, D1, D2], D2, lambda day: _links(), universe.get).equals(first)
+
+
+def test_daily_columns_keep_their_type_on_days_without_values():
+    """Outside the Tick Size Pilot every pilot_group is empty; it must still be text, so days can be read together."""
+    import pyarrow as pa
+    daily = _day()["daily"]
+    kind = pa.Table.from_pandas(daily).schema.field("pilot_group").type
+    assert pa.types.is_string(kind) or pa.types.is_large_string(kind)

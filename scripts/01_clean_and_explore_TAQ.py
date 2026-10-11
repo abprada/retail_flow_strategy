@@ -712,5 +712,270 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.1 The training data: shape and health
+
+    **Purpose:** before looking at any values, check what `train/` holds: every day has its three files, how many rows each table has per day, each column's type, how many values are empty, and each column's smallest and largest value. Read from the parquet files' own statistics, so nothing is loaded.
+
+    **What we expect:** 2,516 days with three files each; empty values only where they are meaningful (`last_mid` when a bar had no valid quote; in `daily`, the trading columns of a stock that did not trade before 15:50, `open_t` when CRSP has no open, `ret_next` when the target is missing or embargoed, `pilot_group` outside the pilot); no negative counts or prices.
+    """)
+    return
+
+
+@app.cell
+def _(DATA_DIR, mo, pd, pq):
+    TRAIN_DIR = DATA_DIR / "intermediate" / "taq" / "train"
+    TRAIN_DECISION_DAYS = sorted(_p.name for _p in TRAIN_DIR.iterdir() if _p.name.isdigit())
+
+
+    def _file_stats(path):
+        """Rows of a parquet file and, per column, its type, empty values, smallest and largest value (from metadata)."""
+        _meta = pq.ParquetFile(path).metadata
+        _schema = pq.read_schema(path)
+        _rows = []
+        for _i, _field in enumerate(_schema):
+            _nulls, _lo, _hi = 0, None, None
+            for _g in range(_meta.num_row_groups):
+                _s = _meta.row_group(_g).column(_i).statistics
+                if _s is None:
+                    continue
+                _nulls += _s.null_count
+                if _s.has_min_max:
+                    _lo = _s.min if _lo is None else min(_lo, _s.min)
+                    _hi = _s.max if _hi is None else max(_hi, _s.max)
+            _rows.append({"column": _field.name, "type": str(_field.type), "nulls": _nulls, "min": _lo, "max": _hi})
+        return _meta.num_rows, _rows
+
+
+    _missing = [_d for _d in TRAIN_DECISION_DAYS if not all((TRAIN_DIR / _d / f"{_n}.parquet").exists() for _n in ["daily", "bars", "cells"])]
+    _per_day, _cols = [], {}
+    for _day in mo.status.progress_bar(TRAIN_DECISION_DAYS, title="Reading file statistics", remove_on_exit=True):
+        for _name in ["daily", "bars", "cells"]:
+            _n, _stats = _file_stats(TRAIN_DIR / _day / f"{_name}.parquet")
+            _per_day.append({"day": _day, "table": _name, "rows": _n})
+            for _r in _stats:
+                _c = _cols.setdefault((_name, _r["column"]), {"type": _r["type"], "nulls": 0, "min": None, "max": None})
+                _c["nulls"] += _r["nulls"]
+                if _r["min"] is not None:
+                    _c["min"] = _r["min"] if _c["min"] is None else min(_c["min"], _r["min"])
+                    _c["max"] = _r["max"] if _c["max"] is None else max(_c["max"], _r["max"])
+    train_rows = pd.DataFrame(_per_day)
+    _totals = train_rows.groupby("table", sort=False)["rows"]
+    train_shape = pd.DataFrame({"days": _totals.size(), "rows": _totals.sum(), "rows per day, median": _totals.median(),
+                                "min": _totals.min(), "max": _totals.max()})
+    train_columns = pd.DataFrame([{"table": _t, "column": _c, **_v} for (_t, _c), _v in _cols.items()])
+    train_columns["% empty"] = (train_columns["nulls"] / train_columns["table"].map(_totals.sum()) * 100).round(3)
+    train_columns[["min", "max"]] = train_columns[["min", "max"]].astype(str)
+    mo.vstack([
+        mo.md(f"**{len(TRAIN_DECISION_DAYS):,} training days; days missing a file: {len(_missing)}**"),
+        train_shape,
+        mo.md("**Every column**: type, empty values, smallest and largest value over all training days"),
+        mo.ui.table(train_columns[["table", "column", "type", "nulls", "% empty", "min", "max"]], selection=None, page_size=60),
+    ])
+    return TRAIN_DECISION_DAYS, TRAIN_DIR
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.2 Table heads
+
+    The first rows of each table on one training day, 2019-06-04: `daily` (one row per universe stock), `bars` and `cells` (rows by stock, then in time order). Codes are explained in `data/intermediate/taq/codes.csv`.
+    """)
+    return
+
+
+@app.cell
+def _(TRAIN_DIR, mo, pq):
+    _day = TRAIN_DIR / "20190604"
+    mo.vstack([
+        mo.vstack([mo.md(f"**`{_name}`**: {pq.ParquetFile(_day / f'{_name}.parquet').metadata.num_rows:,} rows"),
+                   pq.read_table(_day / f"{_name}.parquet").slice(0, 15).to_pandas()])
+        for _name in ["daily", "bars", "cells"]
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.3 The market over time
+
+    **Purpose:** see how trading, spreads, market value and the retail measures move over the training years, and whether anything breaks. One pass over the 2,516 training days sums `bars` across all universe stocks per day and summarises `daily`; every plot reads that table (`market_days`). A decision day's totals include the previous day's last 10 minutes and evening: everything known by its 15:50.
+
+    **Marked on every plot:** the Tick Size Pilot (2016-10 to 2018-09, shaded), zero commissions (2019-10-07), COVID (2020-03), fractional shares printing as one-share trades (2021-02-16) and the meme surge (late January 2021).
+
+    **Columns** (meanings in `explanations/TAQ/pulled_data_full.md`): `bjzz_*` retail trades by the sub-penny rule, `mid_*` by the midpoint rule, `off_*` all off-exchange, `qr_*` the quote rule on every venue and `exch_qr_*` on exchanges only, `both_signed` and `same_sign` how often the two retail rules sign the same trade and agree.
+    """)
+    return
+
+
+@app.cell
+def _(TRAIN_DECISION_DAYS, TRAIN_DIR, mo, pd, pq):
+    _bar_sums = ["trades", "shares", "dollars", "bjzz_buy_trades", "bjzz_buy_dollars", "bjzz_sell_trades", "bjzz_sell_dollars",
+                 "mid_buy_trades", "mid_buy_dollars", "mid_sell_trades", "mid_sell_dollars", "off_trades", "off_dollars",
+                 "off_odd_trades", "off_one_trades", "qr_buy_shares", "qr_sell_shares", "exch_qr_buy_shares",
+                 "exch_qr_sell_shares", "both_signed_trades", "same_sign_trades"]
+    _rows = []
+    for _day in mo.status.progress_bar(TRAIN_DECISION_DAYS, title="Summing the training days", remove_on_exit=True):
+        _b = pq.read_table(TRAIN_DIR / _day / "bars.parquet", columns=_bar_sums).to_pandas().sum()
+        _d = pq.read_table(TRAIN_DIR / _day / "daily.parquet", columns=[
+            "is_common", "cap_prev", "dollar_volume_prev", "spread_bp", "traded_before_cutoff"]).to_pandas()
+        _w = _d["dollar_volume_prev"].where(_d["spread_bp"].notna())
+        _rows.append({"day": pd.Timestamp(_day), **_b.to_dict(), "stocks": len(_d), "traded": int(_d["traded_before_cutoff"].sum()),
+                      "cap_all": _d["cap_prev"].sum() * 1e3, "cap_common": _d.loc[_d["is_common"], "cap_prev"].sum() * 1e3,
+                      "spread_median": _d["spread_bp"].median(), "spread_dollar_weighted": (_d["spread_bp"] * _w).sum() / _w.sum()})
+    market_days = pd.DataFrame(_rows).set_index("day")
+    market_days
+    return (market_days,)
+
+
+@app.cell
+def _(PILOT_END, PILOT_START, pd):
+    MARKET_EVENTS = {"zero commissions": "2019-10-07", "COVID": "2020-03-16", "meme surge": "2021-01-27",
+                     "fractional shares print": "2021-02-16"}
+
+
+    def mark_events(ax):
+        """Shade the Tick Size Pilot and mark the market events on a time-series axis."""
+        ax.axvspan(PILOT_START, PILOT_END, color="0.92", zorder=0)
+        for _name, _day in MARKET_EVENTS.items():
+            ax.axvline(pd.Timestamp(_day), color="0.5", lw=0.7, ls="--", zorder=1)
+
+
+    def two_axes(ax, left, right, left_label, right_label, title):
+        """Series on two y axes: `left` and `right` are {label: series}; left in solid lines, right in dashed."""
+        mark_events(ax)
+        for _i, (_label, _s) in enumerate(left.items()):
+            ax.plot(_s.index, _s, lw=0.6, color=f"C{_i}", label=f"{_label} (left)")
+        ax.set_ylabel(left_label)
+        _r = ax.twinx()
+        for _i, (_label, _s) in enumerate(right.items()):
+            _r.plot(_s.index, _s, lw=0.6, ls="--", color=f"C{_i + len(left)}", label=f"{_label} (right)")
+        _r.set_ylabel(right_label)
+        _h = ax.get_legend_handles_labels()[0] + _r.get_legend_handles_labels()[0]
+        ax.legend(_h, [_x.get_label() for _x in _h], fontsize=7, loc="upper left")
+        ax.set_title(title, fontsize=10)
+
+    return mark_events, two_axes
+
+
+@app.cell
+def _(mark_events, market_days, plt, two_axes):
+    _m = market_days
+    _fig, _axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+    two_axes(_axes[0, 0], {"trades, millions": _m["trades"] / 1e6}, {"dollars, $ billions": _m["dollars"] / 1e9},
+             "trades (millions)", "dollars ($ billions)", "All trading by the universe stocks per day")
+    two_axes(_axes[0, 1], {"stocks in the universe": _m["stocks"], "traded before 15:50": _m["traded"]}, {},
+             "stocks", "", "Stocks in the universe")
+    mark_events(_axes[1, 0])
+    _axes[1, 0].plot(_m.index, _m["spread_median"], lw=0.6, label="median stock")
+    _axes[1, 0].plot(_m.index, _m["spread_dollar_weighted"], lw=0.6, label="weighted by previous dollar volume")
+    _axes[1, 0].set_ylabel("bp"); _axes[1, 0].legend(fontsize=7); _axes[1, 0].set_title("Quoted spread to 15:50", fontsize=10)
+    two_axes(_axes[1, 1], {"all universe stocks": _m["cap_all"] / 1e12, "US common stock": _m["cap_common"] / 1e12}, {},
+             "$ trillions", "", "Total market cap, previous close")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(market_days, plt, two_axes):
+    _m = market_days
+    _fig, _axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    two_axes(_axes[0], {"buys": _m["bjzz_buy_trades"] / 1e6, "sells": _m["bjzz_sell_trades"] / 1e6},
+             {"buys": _m["bjzz_buy_dollars"] / 1e9, "sells": _m["bjzz_sell_dollars"] / 1e9},
+             "trades (millions)", "dollars ($ billions)", "Retail by the sub-penny rule (BJZZ)")
+    two_axes(_axes[1], {"buys": _m["mid_buy_trades"] / 1e6, "sells": _m["mid_sell_trades"] / 1e6},
+             {"buys": _m["mid_buy_dollars"] / 1e9, "sells": _m["mid_sell_dollars"] / 1e9},
+             "trades (millions)", "dollars ($ billions)", "Retail by the midpoint rule")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(market_days, plt, two_axes):
+    _m = market_days
+    _fig, _axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+    two_axes(_axes[0, 0], {"trades, millions": _m["off_trades"] / 1e6}, {"dollars, $ billions": _m["off_dollars"] / 1e9},
+             "trades (millions)", "dollars ($ billions)", "Off-exchange trading")
+    two_axes(_axes[0, 1], {"odd lots (1-99 shares)": _m["off_odd_trades"] / 1e6, "single shares": _m["off_one_trades"] / 1e6}, {},
+             "trades (millions)", "", "Off-exchange odd lots and single-share trades")
+    two_axes(_axes[1, 0], {"buys": _m["qr_buy_shares"] / 1e9, "sells": _m["qr_sell_shares"] / 1e9}, {},
+             "shares (billions)", "", "Quote rule, every venue")
+    two_axes(_axes[1, 1], {"buys": _m["exch_qr_buy_shares"] / 1e9, "sells": _m["exch_qr_sell_shares"] / 1e9}, {},
+             "shares (billions)", "", "Quote rule, exchanges only")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(market_days, plt, two_axes):
+    _m = market_days
+    _fig, _axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    two_axes(_axes[0], {"signed by both rules": _m["both_signed_trades"] / 1e6, "same sign": _m["same_sign_trades"] / 1e6},
+             {"agreement, same / both": _m["same_sign_trades"] / _m["both_signed_trades"]},
+             "trades (millions)", "share", "Agreement of the two retail rules")
+    _ratios = {
+        "off-exchange / all trades": _m["off_trades"] / _m["trades"],
+        "BJZZ-signed / off-exchange": (_m["bjzz_buy_trades"] + _m["bjzz_sell_trades"]) / _m["off_trades"],
+        "midpoint-signed / off-exchange": (_m["mid_buy_trades"] + _m["mid_sell_trades"]) / _m["off_trades"],
+        "odd lots / off-exchange": _m["off_odd_trades"] / _m["off_trades"],
+        "single shares / off-exchange": _m["off_one_trades"] / _m["off_trades"],
+        "BJZZ buys / (buys + sells)": _m["bjzz_buy_trades"] / (_m["bjzz_buy_trades"] + _m["bjzz_sell_trades"]),
+    }
+    two_axes(_axes[1], _ratios, {}, "share of trades", "", "Shares of trading")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **Comparing the retail measures.** Four measures of retail trading in `bars`: the sub-penny rule (BJZZ) and the midpoint rule, each as buys and sells, and two that do not use sub-penny prices: off-exchange odd lots (1 to 99 shares; retail trades small) and off-exchange single-share trades (mostly fractional orders from 2021). The quote rule is left out: it signs all trades, not retail ones.
+
+    1. **Levels**: each measure divided by its 2014 average (21-day average, log scale), with the median stock's spread on the right axis.
+    2. **Day-to-day agreement**: the correlation of the measures' daily percentage changes, over a rolling quarter (63 days).
+    3. **Direction**: the buy-sell imbalance, (buys - sells) / (buys + sells), by each rule (21-day average), which is what a retail flow signal would use.
+
+    Below, the correlation of the daily percentage changes over all training days.
+    """)
+    return
+
+
+@app.cell
+def _(market_days, mo, pd, plt, two_axes):
+    _m = market_days
+    _retail = pd.DataFrame({
+        "BJZZ buys": _m["bjzz_buy_trades"], "BJZZ sells": _m["bjzz_sell_trades"],
+        "midpoint buys": _m["mid_buy_trades"], "midpoint sells": _m["mid_sell_trades"],
+        "odd lots": _m["off_odd_trades"], "single shares": _m["off_one_trades"],
+    })
+    _level = _retail.rolling(21).mean() / _retail[_retail.index.year == 2014].mean()
+    _change = _retail.pct_change()
+    _fig, _axes = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
+    two_axes(_axes[0], {_c: _level[_c] for _c in _level}, {"median spread, bp": _m["spread_median"].rolling(21).mean()},
+             "multiple of the 2014 average (log)", "spread (bp)", "Retail measures, level")
+    _axes[0].set_yscale("log")
+    _pairs = {"BJZZ vs midpoint (buys + sells)": (_retail["BJZZ buys"] + _retail["BJZZ sells"], _retail["midpoint buys"] + _retail["midpoint sells"]),
+              "BJZZ vs odd lots": (_retail["BJZZ buys"] + _retail["BJZZ sells"], _retail["odd lots"]),
+              "midpoint vs odd lots": (_retail["midpoint buys"] + _retail["midpoint sells"], _retail["odd lots"])}
+    two_axes(_axes[1], {_k: _a.pct_change().rolling(63).corr(_b.pct_change()) for _k, (_a, _b) in _pairs.items()}, {},
+             "correlation of daily % changes", "", "Day-to-day agreement of the measures (rolling 63 days)")
+    _imb = {"BJZZ": (_retail["BJZZ buys"] - _retail["BJZZ sells"]) / (_retail["BJZZ buys"] + _retail["BJZZ sells"]),
+            "midpoint": (_retail["midpoint buys"] - _retail["midpoint sells"]) / (_retail["midpoint buys"] + _retail["midpoint sells"])}
+    two_axes(_axes[2], {_k: _v.rolling(21).mean() for _k, _v in _imb.items()}, {}, "imbalance", "",
+             "Retail buy-sell imbalance, (buys - sells) / (buys + sells)")
+    _axes[2].axhline(0, color="0.3", lw=0.6)
+    _fig.tight_layout()
+    mo.vstack([_fig, mo.md("**Correlation of the daily % changes, all training days**"), _change.corr().round(2)])
+    return
+
+
 if __name__ == "__main__":
     app.run()

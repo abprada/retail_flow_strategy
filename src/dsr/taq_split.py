@@ -139,7 +139,9 @@ def decision_day_tables(previous: dict | None, own: dict, previous_links: pd.Dat
              .merge(names, on="permno", how="left")
              .merge(spread, on="permno", how="left"))
     daily["traded_before_cutoff"] = daily["permno"].isin(traded)
-    out["daily"] = daily.reindex(columns=DAILY_COLUMNS).sort_values("permno", ignore_index=True)
+    daily = daily.reindex(columns=DAILY_COLUMNS).sort_values("permno", ignore_index=True)
+    out["daily"] = daily.astype({"symbol": "string", "security_type": "string", "pilot_group": "string"})  # text even
+    # on days without a value, so every day's file has the same columns and types
     return {name: out[name] for name in TABLES}
 
 
