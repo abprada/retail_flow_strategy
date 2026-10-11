@@ -1,6 +1,6 @@
 import pandas as pd
 
-from dsr.taq_split import CODES, decision_day_tables, stock_days, write_decision_days
+from dsr.taq_split import CODES, decision_day_tables, stack_panels, stock_days, write_decision_days
 
 D0, D1, D2 = "20231228", "20231229", "20240102"  # three trading days; the test period starts at D2
 
@@ -11,17 +11,20 @@ def _links(permno=1, primary=True, symbol="A", pilot=None):
                          "pilot_group": [pilot]})
 
 
-def _tables(buckets, symbol="A"):
-    """cells and bars with one row per bucket given (counts stored as doubles, as the pull does); daily one row."""
+def _tables(buckets, symbol="A", close=10.0, dollars=100_000.0):
+    """cells and bars with one row per bucket given (counts stored as doubles, as the pull does); daily one row.
+
+    Each bar trades `dollars`, and its last trade is at `close`."""
     bars = pd.DataFrame({"symbol": symbol, "bucket": buckets, "bar": 0, "trades": [10 * (b + 1) for b in buckets],
-                         "shares": [100.0 * (b + 1) for b in buckets], "bjzz_buy_trades": 1.0})
+                         "shares": [100.0 * (b + 1) for b in buckets], "bjzz_buy_trades": 1.0,
+                         "close": close, "dollars": dollars})
     cells = bars[["symbol", "bucket", "trades", "shares"]].assign(venue=0, z=0, q=0, spread=0, size=0)
     return {"daily": pd.DataFrame({"symbol": [symbol], "spread_bp": [5.0]}), "cells": cells, "bars": bars}
 
 
-def _universe(permnos=(1,), day=D1):
+def _universe(permnos=(1,), day=D1, facprc=1.0, div=0.0):
     return pd.DataFrame({"decision_day": pd.Timestamp(day), "permno": pd.array(list(permnos), dtype="Int64"),
-                         "security_type": "common stock", "ret_next": 0.01})
+                         "security_type": "common stock", "facprc_t": facprc, "div_t": div, "ret_next": 0.01})
 
 
 def _day(prev=None, own=None, prev_links=None, own_links=None, universe=None):
@@ -36,6 +39,7 @@ def test_a_day_holds_the_previous_days_last_bar_and_evening_then_its_own_morning
     bars = _day()["bars"]
     assert bars["piece"].tolist() == ["prev_last10", "prev_evening", "pre_open", "session"]
     assert bars["trades"].tolist() == [30, 40, 10, 20]
+    assert not {"close", "dollars"} - set(bars.columns)  # trade rows are copied unchanged
 
 
 def test_rows_lose_the_columns_the_filter_makes_redundant_and_counts_are_integers():
@@ -58,23 +62,48 @@ def test_only_the_universes_primary_symbols_are_kept():
 
 
 def test_each_row_takes_the_permno_of_the_day_it_traded():
-    """Symbol A belonged to stock 7 yesterday and to stock 8 today; both in the universe."""
-    out = _day(prev_links=_links(7), own_links=_links(8), universe=_universe((7, 8)))
-    assert out["bars"].set_index("piece")["permno"].to_dict() == {
-        "prev_last10": 7, "prev_evening": 7, "pre_open": 8, "session": 8}
+    """Stocks 7 and 8 swap symbols A and B overnight; both in the universe. B's bars have 1,000 more trades."""
+    def two(buckets):
+        a, b = _tables(buckets), _tables(buckets, symbol="B")
+        b["bars"]["trades"] += 1000
+        return {name: pd.concat([a[name], b[name]], ignore_index=True) for name in a}
+    yesterday = pd.concat([_links(7), _links(8, symbol="B")], ignore_index=True)
+    today = pd.concat([_links(8), _links(7, symbol="B")], ignore_index=True)
+    bars = _day(two([0, 1, 2, 3]), two([0, 1, 2, 3]), yesterday, today, _universe((7, 8)))["bars"]
+    stock_7 = bars[bars["permno"] == 7].set_index("piece")["trades"].to_dict()
+    assert stock_7 == {"prev_last10": 30, "prev_evening": 40, "pre_open": 1010, "session": 1020}  # A, then B
 
 
-def test_daily_has_one_row_per_universe_stock_even_without_trades():
+def test_daily_has_one_row_per_universe_stock_that_traded_enough_before_both_cutoffs():
     daily = _day(universe=_universe((1, 5)))["daily"].set_index("permno")  # stock 5 did not trade
-    assert list(daily.index) == [1, 5]
-    assert daily.loc[1, "symbol"] == "A" and daily.loc[1, "spread_bp"] == 5.0 and daily.loc[1, "traded_before_cutoff"]
-    assert pd.isna(daily.loc[5, "spread_bp"]) and not daily.loc[5, "traded_before_cutoff"]
-    assert daily.loc[5, "ret_next"] == 0.01
+    assert list(daily.index) == [1]
+    assert daily.loc[1, "symbol"] == "A" and daily.loc[1, "spread_bp"] == 5.0 and daily.loc[1, "ret_next"] == 0.01
 
 
-def test_first_day_without_a_previous_day():
+def test_rule_2_needs_50_thousand_dollars_before_the_cutoff_today_and_the_day_before():
+    """Buckets 0 and 1 count (pre-open and session); a day's last 10 minutes and evening do not."""
+    thin = _tables([0, 1, 2, 3], dollars=24_000.0)  # 48,000 before the cutoff
+    assert _day(own=thin)["daily"].empty
+    assert _day(prev=thin)["daily"].empty
+    assert len(_day(prev=_tables([0, 1, 2, 3], dollars=25_000.0))["daily"]) == 1  # exactly 50,000
+    assert _day(prev=_tables([2, 3], dollars=1e9))["daily"].empty  # traded only after yesterday's cutoff
+    assert _day(own=thin)["bars"].empty and _day(own=thin)["cells"].empty
+
+
+def test_ret_1550_from_the_last_trades_before_both_cutoffs_with_the_split_factor_and_dividend():
+    """Yesterday's last trade before the cutoff at 40; today, after a 2-for-1 split and a 0.10 dividend, at 20.5."""
+    prev = _tables([0, 1, 2, 3], close=40.0)
+    prev["bars"].loc[prev["bars"]["bucket"].isin([2, 3]), "close"] = 99.0  # after the cutoff: not used
+    own = _tables([0, 1, 2, 3], close=20.5)
+    daily = _day(prev, own, universe=_universe(facprc=2.0, div=0.1))["daily"]
+    assert abs(daily["ret_1550"].iloc[0] - ((20.5 * 2.0 + 0.1) / 40.0 - 1)) < 1e-12
+    assert "div_t" not in daily and "traded_before_cutoff" not in daily
+
+
+def test_first_day_without_a_previous_day_has_no_stocks():
+    """No price before the previous cutoff, so no return to 15:50 (the real first day always has one)."""
     out = decision_day_tables(None, _tables([0, 1, 2, 3]), None, _links(), None, D1, _universe())
-    assert out["bars"]["piece"].tolist() == ["pre_open", "session"]
+    assert out["daily"].empty and out["bars"].empty
 
 
 def test_every_code_has_a_meaning():
@@ -91,25 +120,28 @@ def _crsp(rows):
 
 
 NAMES = pd.DataFrame({
-    "permno": [1, 2, 3], "namedt": pd.to_datetime(["2010-01-01"] * 3), "nameenddt": pd.to_datetime(["2030-01-01"] * 3),
-    "ticker": ["A", "B", "C"], "securitytype": ["EQTY", "EQTY", "FUND"], "securitysubtype": ["COM", "COM", "CEF"],
-    "sharetype": ["NS", "NS", "NS"], "usincflg": ["Y", "Y", "Y"], "issuertype": ["CORP", "CORP", "FUND"],
-    "primaryexch": ["N", "N", "N"],
+    "permno": [1, 2, 3, 4, 5], "namedt": pd.to_datetime(["2010-01-01"] * 5),
+    "nameenddt": pd.to_datetime(["2030-01-01"] * 5), "ticker": ["A", "B", "C", "D", "E"],
+    "securitytype": ["EQTY", "EQTY", "FUND", "FUND", "EQTY"], "securitysubtype": ["COM", "COM", "CEF", "ETF", "COM"],
+    "sharetype": ["NS"] * 5, "usincflg": ["Y"] * 5, "issuertype": ["CORP", "CORP", "FUND", "FUND", "CORP"],
+    "primaryexch": ["N"] * 5,
 })
 
 
 def test_universe_from_the_previous_days_price_and_cap_and_the_security_type():
     crsp = _crsp([
-        (1, "2023-12-28", 10.0, 60_000, 1e6, 0.01, "D1", 9.9, 1.0),   # in: $10, $60M, common stock
-        (2, "2023-12-28", 0.5, 60_000, 1e6, 0.01, "D1", 0.5, 1.0),    # out: under $1
-        (3, "2023-12-28", 10.0, 60_000, 1e6, 0.01, "D1", 10.0, 1.0),  # out: closed-end fund
-        (1, "2023-12-29", 11.0, 61_000, 1e6, 0.02, "D1", 10.5, 1.0),
-        (1, "2024-01-02", 12.0, 62_000, 1e6, 0.03, "D2", 11.5, 2.0),
+        (1, "2023-12-28", 10.0, 160_000, 1e6, 0.01, "D1", 9.9, 1.0),  # in: $10, $160M, common stock
+        (2, "2023-12-28", 0.5, 160_000, 1e6, 0.01, "D1", 0.5, 1.0),    # out: under $1
+        (5, "2023-12-28", 10.0, 160_000, 99_999, 0.01, "D1", 10.0, 1.0),  # out: under $100,000 traded (rule 1)
+        (3, "2023-12-28", 10.0, 160_000, 1e6, 0.01, "D1", 10.0, 1.0),  # out: closed-end fund
+        (4, "2023-12-28", 10.0, 160_000, 1e6, 0.01, "D1", 10.0, 1.0),  # out: ETF
+        (1, "2023-12-29", 11.0, 161_000, 1e6, 0.02, "D1", 10.5, 1.0),
+        (1, "2024-01-02", 12.0, 162_000, 1e6, 0.03, "D2", 11.5, 2.0),
     ])
     out = stock_days(crsp, NAMES, [D0, D1, D2], D2, early_closes=set())
     day1 = out[out["decision_day"] == pd.Timestamp(D1)].set_index("permno")
     assert list(day1.index) == [1]
-    assert day1.loc[1, "price_prev"] == 10.0 and day1.loc[1, "cap_prev"] == 60_000 and day1.loc[1, "open_t"] == 10.5
+    assert day1.loc[1, "price_prev"] == 10.0 and day1.loc[1, "cap_prev"] == 160_000 and day1.loc[1, "open_t"] == 10.5
     assert pd.isna(day1.loc[1, "ret_next"])  # 2023-12-29's target ends in the test period: the embargo
     day2 = out[out["decision_day"] == pd.Timestamp(D2)].set_index("permno")
     assert day2.loc[1, "facprc_t"] == 2.0 and pd.isna(day2.loc[1, "ret_next"])  # no next day in the sample
@@ -117,16 +149,44 @@ def test_universe_from_the_previous_days_price_and_cap_and_the_security_type():
 
 def test_target_kept_only_over_one_trading_day():
     crsp = _crsp([
-        (1, "2023-12-28", 10.0, 60_000, 1e6, 0.01, "D1", 10.0, 1.0),
-        (1, "2023-12-29", 11.0, 61_000, 1e6, 0.02, "D1", 10.5, 1.0),
-        (1, "2024-01-02", 12.0, 62_000, 1e6, 0.03, "D4", 11.5, 1.0),
+        (1, "2023-12-28", 10.0, 160_000, 1e6, 0.01, "D1", 10.0, 1.0),
+        (1, "2023-12-29", 11.0, 161_000, 1e6, 0.02, "D1", 10.5, 1.0),
+        (1, "2024-01-02", 12.0, 162_000, 1e6, 0.03, "D4", 11.5, 1.0),
     ])
     out = stock_days(crsp, NAMES, [D0, D1, D2], "20240103", early_closes=set()).set_index("decision_day")
     assert out.loc[pd.Timestamp(D1), "ret_next"] == 0.03 and not out.loc[pd.Timestamp(D1), "ret_next_is_delisting"]
 
 
-def test_cap_floor_is_50_million_in_crsps_thousands():
-    crsp = _crsp([(1, "2023-12-28", 10.0, 49_999, 1e6, 0.0, "D1", 10.0, 1.0)])
+def test_dividend_on_its_ex_date():
+    crsp = _crsp([
+        (1, "2023-12-28", 10.0, 160_000, 1e6, 0.01, "D1", 10.0, 1.0),
+        (1, "2023-12-29", 11.0, 161_000, 1e6, 0.02, "D1", 10.5, 1.0),
+    ])
+    dividends = pd.DataFrame({"permno": [1, 1], "date": pd.to_datetime(["2023-12-29", "2023-12-29"]), "div": [0.1, 0.05]})
+    out = stock_days(crsp, NAMES, [D0, D1, D2], D2, early_closes=set(), dividends=dividends).set_index("decision_day")
+    assert abs(out.loc[pd.Timestamp(D1), "div_t"] - 0.15) < 1e-12
+    out = stock_days(crsp, NAMES, [D0, D1, D2], D2, early_closes=set())
+    assert out["div_t"].eq(0).all()
+
+
+def test_a_distribution_with_its_own_share_factor_is_left_to_the_split_factor():
+    """A stock distribution (shares, not cash) on a day CRSP adjusts the price by: counting its amount too would count
+    it twice. Its amount counts on a day without a price factor, as cash does."""
+    crsp = _crsp([
+        (1, "2023-12-28", 100.0, 160_000, 1e6, 0.01, "D1", 100.0, 1.0),
+        (1, "2023-12-29", 10.0, 161_000, 1e6, 0.02, "D1", 10.5, 10.0),  # a price factor of 10 that day
+        (2, "2023-12-28", 10.0, 160_000, 1e6, 0.01, "D1", 10.0, 1.0),
+        (2, "2023-12-29", 10.0, 160_000, 1e6, 0.01, "D1", 10.0, 1.0),
+    ])
+    dividends = pd.DataFrame({"permno": [1, 1, 2], "date": pd.to_datetime(["2023-12-29"] * 3),
+                              "div": [90.0, 0.5, 2.0], "facpr": [9.0, 0.0, 1.0]})
+    out = stock_days(crsp, NAMES, [D0, D1, D2], D2, early_closes=set(), dividends=dividends)
+    out = out[out["decision_day"] == pd.Timestamp(D1)].set_index("permno")
+    assert out.loc[1, "div_t"] == 0.5 and out.loc[2, "div_t"] == 2.0
+
+
+def test_cap_floor_is_100_million_in_crsps_thousands():
+    crsp = _crsp([(1, "2023-12-28", 10.0, 99_999, 1e6, 0.0, "D1", 10.0, 1.0)])
     assert len(stock_days(crsp, NAMES, [D0, D1, D2], D2, early_closes=set())) == 0
 
 
@@ -141,6 +201,13 @@ def test_writer_puts_each_day_in_its_period_and_resumes(tmp_path):
     assert first[["decision_day", "period"]].values.tolist() == [[D1, "train"], [D2, "test"]]
     assert (out / "test" / D2 / "daily.parquet").exists()
     assert write_decision_days(pull, out, [D0, D1, D2], D2, lambda day: _links(), universe.get).equals(first)
+    stack_panels(out)
+    panel = pd.read_parquet(out / "panel_train.parquet")
+    assert panel["day"].tolist() == [pd.Timestamp(D1)] and panel.columns[:2].tolist() == ["day", "permno"]
+    assert len(pd.read_parquet(out / "panel_test.parquet")) == 1
+    assert not list(out.glob("*/*/daily.parquet")) and (out / "train" / D1 / "bars.parquet").exists()
+    assert write_decision_days(pull, out, [D0, D1, D2], D2, lambda day: _links(), universe.get)[
+        ["decision_day", "period", "bars_rows"]].equals(first[["decision_day", "period", "bars_rows"]])  # resumes
 
 
 def test_daily_columns_keep_their_type_on_days_without_values():
@@ -149,3 +216,11 @@ def test_daily_columns_keep_their_type_on_days_without_values():
     daily = _day()["daily"]
     kind = pa.Table.from_pandas(daily).schema.field("pilot_group").type
     assert pa.types.is_string(kind) or pa.types.is_large_string(kind)
+
+
+def test_stack_panels_skips_a_period_not_written(tmp_path):
+    day = tmp_path / "train" / D1
+    day.mkdir(parents=True)
+    _day()["daily"].to_parquet(day / "daily.parquet")
+    stack_panels(tmp_path)
+    assert (tmp_path / "panel_train.parquet").exists() and not (tmp_path / "panel_test.parquet").exists()

@@ -5,11 +5,13 @@ previous WCT day's last 10 minutes and evening piece (buckets 2 and 3, after tha
 and session to the cutoff (buckets 0 and 1). Each row takes the PERMNO its symbol had on the day it traded, so the
 previous day's pieces keep that day's PERMNO across a ticker change.
 
-The universe is decided per decision day with what was known the day before (stock_days): CRSP's security type that
-day is common stock, foreign common stock, ADR, ETF or REIT, and the previous trading day's close is at least $1 and
-its market cap at least $50M. A decision day keeps the bars and cells rows of its universe stocks' primary symbols,
-and one daily row per universe stock, whether or not it traded, with what is known before 15:50 and the target.
-Trade rows are copied unchanged otherwise; `audit` stays with the pull.
+The universe is decided per decision day with what was known at its cutoff. From the day before (stock_days): CRSP's
+security type that day is common stock, foreign common stock, ADR or REIT, the previous trading day's close is at least
+$1, its market cap at least $100M and its dollar volume at least $100,000 (rule 1). From the tape (decision_day_tables):
+at least $50,000 traded before the cutoff on the decision day and on the trading day before (rule 2). A decision day
+keeps the bars and cells rows of its universe stocks' primary symbols, and one daily row per universe stock with what is
+known before 15:50, the return to 15:50 and the target. Trade rows are copied unchanged otherwise; `audit` stays with
+the pull. stack_panels then gathers each period's daily rows into one panel file.
 """
 
 import shutil
@@ -27,13 +29,17 @@ OWN, PREVIOUS = [0, 1], [2, 3]  # buckets a decision day takes from its own WCT 
 PIECES = {2: "prev_last10", 3: "prev_evening", 0: "pre_open", 1: "session"}
 _ORDER = {bucket: i for i, bucket in enumerate(PIECES)}
 
-UNIVERSE_TYPES = ("common stock", "foreign common stock", "ADR", "ETF", "REIT")
+UNIVERSE_TYPES = ("common stock", "foreign common stock", "ADR", "REIT")  # ETFs out since 2026-10-11
 PRICE_MIN = 1.0  # previous trading day's close, dollars
-CAP_MIN = 50_000  # previous trading day's market cap; CRSP's dlycap is in thousands of dollars, so $50M
+CAP_MIN = 100_000  # previous trading day's market cap; CRSP's dlycap is in thousands of dollars, so $100M (2026-10-11)
+# cleaning rules chosen on the training days (data/intermediate/taq/train/), applied unchanged to the test days
+DOLLAR_VOLUME_MIN = 100_000  # previous trading day's dollar volume: drops the stocks that barely trade (2026-10-10)
+DOLLARS_BEFORE_CUTOFF_MIN = 50_000  # dollars traded before the cutoff (pre-open and session), on the decision day and
+# on the trading day before it, so both ends of the return to 15:50 have a price (2026-10-11)
 
 DAILY_COLUMNS = ["permno", "symbol", "security_type", "is_common", "pilot_group", "early_close", "price_prev",
-                 "cap_prev", "dollar_volume_prev", "ret_prev", "open_t", "facprc_t", "traded_before_cutoff",
-                 "spread_bp", "ret_next", "ret_next_is_delisting"]
+                 "cap_prev", "dollar_volume_prev", "ret_prev", "open_t", "facprc_t", "spread_bp", "ret_1550", "ret_next",
+                 "ret_next_is_delisting"]
 
 CODES = pd.DataFrame([
     ("piece", 0, "prev_last10", "previous trading day, from its cutoff (15:50; 12:50 on early closes) to its close"),
@@ -59,20 +65,24 @@ CODES = pd.DataFrame([
 
 
 def stock_days(crsp: pd.DataFrame, name_records: pd.DataFrame, wct_days: list[str], test_start: str,
-               early_closes: set[str]) -> pd.DataFrame:
+               early_closes: set[str], dividends: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per decision day and PERMNO in the universe, with what is known before its 15:50 and the target.
 
     crsp: CRSP daily rows (permno, date, price, cap in thousands, dollar_volume, ret, ret_span, open, facprc).
     name_records: dsr.crsp.read_name_records. wct_days: every trading day pulled (YYYYMMDD), in order; decision days
-    are all but the first. The target ret_next (CRSP's return from the decision day's close to the next trading day's,
-    delisting returns included) is kept only when it spans one trading day, and left empty when it ends in the test
-    period for a training day (the embargo) or after the last day.
+    are all but the first. dividends: CRSP's distributions per permno and ex-date (date), with the amount per share
+    (div) and the distribution's share factor (facpr); div_t sums the amounts CRSP adds to the decision day's return,
+    known before its open: all but those of distributions of shares on a day with a price factor, which facprc_t
+    carries (this matches CRSP's own return on every ex-date from 2013). The target ret_next (CRSP's return from the
+    decision day's close to the next trading day's, delisting returns included) is kept only when it spans one trading
+    day, and left empty when it ends in the test period for a training day (the embargo) or after the last day.
     """
     days = pd.DatetimeIndex(pd.to_datetime(wct_days))
     nxt = pd.Series(days[1:], index=days[:-1])
     prev = crsp[crsp["date"].isin(days[:-1])].rename(columns={
         "price": "price_prev", "cap": "cap_prev", "dollar_volume": "dollar_volume_prev", "ret": "ret_prev"})
-    prev = prev[prev["price_prev"].abs().ge(PRICE_MIN) & prev["cap_prev"].ge(CAP_MIN)]
+    prev = prev[prev["price_prev"].abs().ge(PRICE_MIN) & prev["cap_prev"].ge(CAP_MIN)
+                & prev["dollar_volume_prev"].ge(DOLLAR_VOLUME_MIN)]
     out = prev.assign(decision_day=prev["date"].map(nxt))[
         ["decision_day", "permno", "price_prev", "cap_prev", "dollar_volume_prev", "ret_prev"]]
 
@@ -89,6 +99,14 @@ def stock_days(crsp: pd.DataFrame, name_records: pd.DataFrame, wct_days: list[st
     embargo = out["decision_day"].lt(pd.Timestamp(test_start)) & out["next_day"].ge(pd.Timestamp(test_start))
     out["ret_next"] = out["ret_next"].where(one_day & ~embargo)
     out["ret_next_is_delisting"] = out["ret_span"].eq("DD").fillna(False).astype(bool) & out["ret_next"].notna()
+    if dividends is not None:
+        div = dividends.rename(columns={"date": "decision_day"}).merge(
+            out[["permno", "decision_day", "facprc_t"]], on=["permno", "decision_day"])
+        if "facpr" in div:  # a distribution of shares on a day CRSP adjusts the price for is in facprc_t already
+            div = div[div["facpr"].eq(0) | div["facprc_t"].eq(1)]
+        div = div.groupby(["permno", "decision_day"], as_index=False)["div"].sum().rename(columns={"div": "div_t"})
+        out = out.merge(div, on=["permno", "decision_day"], how="left")
+    out["div_t"] = out["div_t"].fillna(0.0) if "div_t" in out else 0.0
     out["early_close"] = out["decision_day"].dt.strftime("%Y%m%d").isin(early_closes)
     out["permno"] = out["permno"].astype("Int64")
     return out.drop(columns=["next_day", "ret_span"]).sort_values(["decision_day", "permno"], ignore_index=True)
@@ -108,14 +126,37 @@ def _whole_numbers(table: pd.DataFrame) -> pd.DataFrame:
     return table.astype({c: "int64" for c in counts})
 
 
+def _before_cutoff(tables: dict | None, links: pd.DataFrame | None) -> pd.DataFrame:
+    """Per PERMNO, from a WCT day's bars (pre-open and session, its primary symbol): the dollars traded before the
+    cutoff and the price of the last trade before it."""
+    if tables is None or links is None:
+        return pd.DataFrame({"permno": pd.array([], dtype="Int64"), "dollars": [], "price": []})
+    bars = tables["bars"]
+    bars = bars[bars["bucket"].isin(OWN) & (bars["trades"] > 0)]
+    bars = bars.merge(links.loc[links["primary"], ["symbol", "permno"]], on="symbol", validate="many_to_one")
+    bars = bars.sort_values(["permno", "bucket", "bar"])
+    return (bars.assign(price=bars["close"].astype(float)).groupby("permno", as_index=False)
+            .agg(dollars=("dollars", "sum"), price=("price", "last")))
+
+
 def decision_day_tables(previous: dict | None, own: dict, previous_links: pd.DataFrame | None,
                         own_links: pd.DataFrame, previous_day: str | None, own_day: str,
                         universe: pd.DataFrame) -> dict:
     """A decision day's daily, cells and bars from its own WCT day and the previous one (None for the first day).
 
     links: each WCT day's symbol, permno, primary and pilot_group (from the symbols table of that day). universe: the
-    decision day's rows of stock_days. previous_day and own_day (YYYYMMDD) name the two WCT days.
+    decision day's rows of stock_days. previous_day and own_day (YYYYMMDD) name the two WCT days. Stocks that traded
+    less than DOLLARS_BEFORE_CUTOFF_MIN before either cutoff leave the universe (rule 2). ret_1550 is the last trade
+    before today's cutoff, times the split factor, plus the dividend, over the last trade before yesterday's, minus 1:
+    CRSP's return formula, ending at 15:50 instead of the close.
     """
+    today = _before_cutoff(own, own_links).rename(columns={"dollars": "dollars_t", "price": "price_1550"})
+    yesterday = _before_cutoff(previous, previous_links).rename(columns={"dollars": "dollars_y", "price": "price_1550_y"})
+    universe = universe.merge(today, on="permno", how="inner").merge(yesterday, on="permno", how="inner")
+    universe = universe[universe["dollars_t"].ge(DOLLARS_BEFORE_CUTOFF_MIN)
+                        & universe["dollars_y"].ge(DOLLARS_BEFORE_CUTOFF_MIN)]
+    universe = universe.assign(ret_1550=(universe["price_1550"] * universe["facprc_t"] + universe["div_t"])
+                               / universe["price_1550_y"] - 1)
     stocks = set(universe["permno"].dropna())
     out = {}
     for name in ["cells", "bars"]:
@@ -134,11 +175,9 @@ def decision_day_tables(previous: dict | None, own: dict, previous_links: pd.Dat
     spread = _keep(own["daily"], own_links, stocks)[["permno", "spread_bp"]]
     names = pd.concat([links.loc[links["primary"], ["permno", "symbol", "pilot_group"]]
                        for links in (own_links, previous_links) if links is not None]).drop_duplicates("permno")
-    traded = set(out["bars"].loc[out["bars"]["piece"].isin(["pre_open", "session"]), "permno"])
     daily = (universe.drop(columns=["decision_day"], errors="ignore")
              .merge(names, on="permno", how="left")
              .merge(spread, on="permno", how="left"))
-    daily["traded_before_cutoff"] = daily["permno"].isin(traded)
     daily = daily.reindex(columns=DAILY_COLUMNS).sort_values("permno", ignore_index=True)
     out["daily"] = daily.astype({"symbol": "string", "security_type": "string", "pilot_group": "string"})  # text even
     # on days without a value, so every day's file has the same columns and types
@@ -176,5 +215,25 @@ def write_decision_days(pull_dir: Path, out_dir: Path, wct_days: list[str], test
             part.rename(final)
             previous = own
         rows.append({"decision_day": day, "period": period,
-                     **{f"{name}_rows": pq.ParquetFile(final / f"{name}.parquet").metadata.num_rows for name in TABLES}})
+                     **{f"{name}_rows": pq.ParquetFile(final / f"{name}.parquet").metadata.num_rows
+                        for name in TABLES if (final / f"{name}.parquet").exists()}})
     return pd.DataFrame(rows)
+
+
+def stack_panels(out_dir: Path) -> None:
+    """Gather each period's daily files into one panel, out_dir/panel_<period>.parquet (one row per day and stock),
+    then remove them, leaving bars and cells in the day folders. Written to a .part file and renamed when complete."""
+    for period in ["train", "test"]:
+        folder = out_dir / period
+        days = sorted(p for p in folder.iterdir() if (p / "daily.parquet").exists()) if folder.exists() else []
+        if not days:
+            continue
+        panel = pd.concat([pd.read_parquet(d / "daily.parquet").assign(day=pd.Timestamp(d.name)) for d in days],
+                          ignore_index=True)
+        panel = panel[["day", *[c for c in panel if c != "day"]]]
+        final = out_dir / f"panel_{period}.parquet"
+        part = final.with_name(final.name + ".part")
+        panel.to_parquet(part, index=False, compression="zstd")
+        part.rename(final)
+        for d in days:
+            (d / "daily.parquet").unlink()
