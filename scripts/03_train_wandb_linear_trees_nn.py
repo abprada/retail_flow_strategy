@@ -33,7 +33,7 @@ def _():
     import pandas as pd
     import wandb
 
-    from dsr.evaluation import daily_decile_spread, daily_ic_and_deciles, daily_rank_ic, ic_summary, mse, r2_zero
+    from dsr.evaluation import daily_decile_spread, daily_ic_and_deciles, daily_rank_ic, decile_means, ic_summary, mse, r2_zero
     from dsr.models import fit_predict
     from dsr.walkforward import feature_columns, folds, last_months
 
@@ -42,6 +42,7 @@ def _():
         daily_decile_spread,
         daily_ic_and_deciles,
         daily_rank_ic,
+        decile_means,
         feature_columns,
         fit_predict,
         folds,
@@ -141,7 +142,7 @@ def _(mo):
         - `long_leg_bp` and `short_leg_bp`, what the top and bottom decile each add against the average decile (the short leg's is positive when the bottom decile underperforms), and every decile's `decile_<d>_vs_avg_bp`;
         - `ic_mean`, its Newey-West t-statistic `ic_t`, `ic_positive` and `ic_<year>`.
     - **`is_1b/`** and **`is_all/`**: the same IC, R², MSE and decile measures in sample, each averaged over the 20 folds. In-sample and out-of-sample MSE cover different periods with different volatility; R² is the one to compare.
-    - **`charts/`**: the four groups side by side, IC by fold, R² by fold, and the decile profile (each decile's `ret_next` minus the average decile, decile 1 holding the lowest predictions).
+    - **`charts/`**: the four groups side by side, IC by fold, R² by fold, and the decile profile (each decile's `ret_next` minus the average decile, decile 1 holding the lowest predictions); and `charts/deciles_oos_1b`, the out-of-sample decile profile of the ≥ $1B stocks on its own, with its raw values in a table.
     - **`epoch/`** (the MLP), live as it trains: each epoch's training loss (the average of its batch losses) and hold-out loss, on the target scaled to unit variance, with the fold, seed and epoch number. Every epoch of every fold and seed is one point along `epoch/step`, so each fold shows as one stretch of the line; early stopping keeps the epoch with the lowest hold-out loss.
 
     It returns the out-of-sample predictions (all stocks, with `large_cap`) and the in-sample summaries, for the comparison.
@@ -156,6 +157,7 @@ def _(
     PANEL,
     daily_decile_spread,
     daily_ic_and_deciles,
+    decile_means,
     feature_columns,
     fit_predict,
     folds,
@@ -223,9 +225,11 @@ def _(
               "oos_1b": "out of sample, >= $1B"}
 
 
-    def log_charts(per_fold, overall):
-        """The four groups side by side: IC and R² by fold, and the decile profile."""
+    def log_charts(per_fold, overall, scored_1b):
+        """The four groups side by side: IC and R² by fold, and the decile profile; and the out-of-sample decile profile
+        of the >= $1B stocks on its own, the one to be traded."""
         by_fold = lambda k: [[f[g][k] for f in per_fold] for g in GROUPS]
+        oos_1b = decile_means(scored_1b["day"], scored_1b["pred"], scored_1b["ret_next"])  # raw too, for the table
         fold_axis = f"fold (0 = {per_fold[0]['name']})"
         deciles = list(range(1, 11))
         wandb.log({
@@ -240,6 +244,11 @@ def _(
                 xs=deciles, ys=[[overall[g][f"decile_{d}_vs_avg_bp"] for d in deciles] for g in GROUPS],
                 keys=list(GROUPS.values()), title="ret_next by prediction decile minus the average decile, bp per day",
                 xname="decile"),
+            "charts/deciles_oos_1b": wandb.plot.line(
+                wandb.Table(data=[[int(d), float(r) * 1e4, float(r - oos_1b.mean()) * 1e4] for d, r in oos_1b.items()],
+                            columns=["decile", "ret_next_bp", "vs_average_bp"]),
+                "decile", "vs_average_bp",
+                title="Out of sample, >= $1B: ret_next by prediction decile minus the average decile (bp per day)"),
         })
 
 
@@ -291,7 +300,7 @@ def _(
                    **{g: pd.DataFrame([f[g] for f in per_fold]).mean().to_dict() for g in ("is_all", "is_1b")}}
         if wandb.run is not None:
             wandb.summary.update({f"{g}/{k}": v for g, values in overall.items() for k, v in values.items()})
-            log_charts(per_fold, overall)
+            log_charts(per_fold, overall, scored[scored["large_cap"]])
         return scored, {g: overall[g] for g in ("is_all", "is_1b")}
 
     return summarize, walk_forward
