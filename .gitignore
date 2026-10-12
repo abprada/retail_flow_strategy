@@ -31,3 +31,6 @@ literature/
 
 # Explanations (kept local)
 explanations/
+
+# Weights & Biases local run files
+wandb/
