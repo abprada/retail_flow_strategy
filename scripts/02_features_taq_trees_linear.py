@@ -247,26 +247,41 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 8. Screen: correlations and VIF (train only)
+    ## 8. Near-copies dropped, then screened (train only)
 
-    On the transformed training features. **VIF** (variance inflation factor) of a feature is 1 ÷ (1 − R²) of a regression of that feature on all the others: 1 means it shares nothing with them, 10 means 90% of it is explained by the rest. It equals the diagonal of the inverse of the features' correlation matrix. The pairs listed are those with |correlation| ≥ 0.7. The features dropped here are fixed and dropped from test unchanged.
+    Of each pair of features that move together on the training days, the more basic one stays and the other is dropped (correlations on the transformed training features):
+
+    | Dropped | Moves with (kept) | Correlation |
+    |---|---|---|
+    | `trades`, `dollars` | `retail_trades`, `log_cap`, `spread` (themselves dropped below) | VIF 28 and 43 |
+    | `spread` | `log_cap` | −0.79 |
+    | `log_price` | `log_cap`; `odd_lot_share` | 0.69; 0.53 |
+    | `retail_trades` | `log_cap` | 0.65 |
+    | `dollars_abnormal` | `retail_abnormal` (the project's retail attention) | 0.68 |
+    | `imb_mid_dollars`, `imb_bjzz_dollars` | `imb_mid_trades`, `imb_bjzz_trades` | 0.64 |
+    | `range_today` | `vol_20` | 0.58 |
+
+    **The screen**, on the remaining training features (BJZZ left out, since it is swapped in for the midpoint imbalance, not used with it; `early_close` left out, since it is the same for every stock on a day): **VIF** of a feature is 1 ÷ (1 − R²) of a regression of it on all the others, so 1 means it shares nothing with them; it equals the diagonal of the inverse of the correlation matrix. The pairs listed are those with |correlation| ≥ 0.3. The list is decided on train and applied to test unchanged.
     """)
     return
 
 
 @app.cell
-def _(family_a, family_b, family_c, family_d, mo, np, panel, pd):
-    _x = panel["train"][list(family_a["train"].columns) + list(family_b["train"].columns)
-                        + list(family_c["train"].columns) + list(family_d["train"].columns)]
-    feature_corr = _x.corr()
+def _(PERIODS, mo, np, panel, pd):
+    FEATURES_DROPPED = ["trades", "dollars", "spread", "log_price", "retail_trades", "dollars_abnormal",
+                        "imb_mid_dollars", "imb_bjzz_dollars", "range_today"]  # chosen on train, dropped from test unchanged
+    _keys = ["day", "permno", "ret_next", "cap_prev", "large_cap", "target_demeaned", "target_rank", "target_class"]
+    model_panel = {_p: panel[_p].drop(columns=FEATURES_DROPPED) for _p in PERIODS}
+    _use = [_c for _c in model_panel["train"].columns if _c not in _keys and "bjzz" not in _c and _c != "early_close"]
+    feature_corr = model_panel["train"][_use].astype("float64").corr()
     _pairs = feature_corr.where(np.triu(np.ones(feature_corr.shape, dtype=bool), k=1)).stack()
-    _high = _pairs[_pairs.abs() >= 0.7].sort_values(key=abs, ascending=False)
+    _high = _pairs[_pairs.abs() >= 0.3].sort_values(key=abs, ascending=False)
     feature_vif = pd.Series(np.diag(np.linalg.inv(feature_corr.to_numpy())), index=feature_corr.columns, name="VIF")
     mo.hstack([
         feature_vif.sort_values(ascending=False).round(2).to_frame(),
         _high.round(2).rename("correlation").rename_axis(["feature", "with"]).reset_index(),
     ], justify="start", gap=2)
-    return
+    return (model_panel,)
 
 
 @app.cell(hide_code=True)
@@ -274,19 +289,15 @@ def _(mo):
     mo.md(r"""
     ## 9. The final panel, saved
 
-    Dropped after the screen in section 8: `trades` and `dollars`, near-copies of `retail_trades`, `log_cap` and `spread` (VIF 28 and 43; without them the highest is `log_cap` at 6.9). The volume signal stays as `dollars_abnormal`. The two `imb_bjzz_*` columns stay in the panel: they are the benchmark the ML script swaps in for the midpoint imbalances, not features it uses alongside them.
-
-    Written to `data/processed/model_panel_train.parquet` and `model_panel_test.parquet`; test is written, not looked at.
+    Written to `data/processed/model_panel_train.parquet` and `model_panel_test.parquet`; test is written, not looked at. `imb_bjzz_trades` stays in the panel: it is the benchmark the ML script swaps in for `imb_mid_trades`, not a feature it uses alongside it.
     """)
     return
 
 
 @app.cell
-def _(PERIODS, mo, panel):
-    FEATURES_DROPPED = ["trades", "dollars"]  # chosen on the training VIF (section 8), dropped from test unchanged
+def _(PERIODS, mo, model_panel):
     PROCESSED_DIR = mo.notebook_dir().parent / "data" / "processed"
     PROCESSED_DIR.mkdir(exist_ok=True)
-    model_panel = {_p: panel[_p].drop(columns=FEATURES_DROPPED) for _p in PERIODS}
     for _p in PERIODS:
         model_panel[_p].to_parquet(PROCESSED_DIR / f"model_panel_{_p}.parquet", index=False, compression="zstd")
     mo.md(f"**Written:** {', '.join(f'`model_panel_{_p}.parquet` ({len(model_panel[_p]):,} rows)' for _p in PERIODS)}; "
