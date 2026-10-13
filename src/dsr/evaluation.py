@@ -1,6 +1,6 @@
 """Signal evaluation (explanations/features/features_nn_linear_tree.md, validation measures): daily rank IC, its
-summary, R² against zero, mean squared error, and the average return by prediction decile. Callers pass the stocks
-scored (>= $1B)."""
+summary, R² against zero, mean squared error, and the average return by prediction decile; `measures` and
+`summarize` put them together for a set of scored predictions. Callers pass the stocks scored (>= $1B)."""
 
 import numpy as np
 import pandas as pd
@@ -112,3 +112,35 @@ def daily_decile_spread(day: pd.Series, pred: pd.Series, ret: pd.Series) -> pd.S
     codes, days, n, pred_rank, r = _by_day(day, pred, ret)
     by_day = _deciles_by_day(codes, n, pred_rank, r)
     return pd.Series(by_day[:, 9] - by_day[:, 0], index=days, name="spread")
+
+
+def measures(scored: pd.DataFrame, target: str) -> tuple[dict, pd.Series]:
+    """IC, R², MSE and the decile profile of one set of scored predictions (day, ret_next, target, pred); also
+    returns the daily ICs."""
+    ic_days, deciles = daily_ic_and_deciles(scored["day"], scored["pred"], scored["ret_next"])
+    vs_average = 1e4 * (deciles - deciles.mean())  # bp per day, so the market's drift drops out
+    return {
+        "ic_mean": float(ic_days.mean()),
+        "r2_pct": 100 * r2_zero(scored["pred"], scored[target]),  # in percent: raw values are ~0.0001
+        "mse": mse(scored["pred"], scored[target]),
+        "decile_spread_bp": 1e4 * float(deciles.loc[10] - deciles.loc[1]),
+        "long_leg_bp": float(vs_average.loc[10]),
+        "short_leg_bp": -float(vs_average.loc[1]),
+        **{f"decile_{d}_vs_avg_bp": float(v) for d, v in vs_average.items()},
+    }, ic_days
+
+
+def summarize(scored: pd.DataFrame, target: str) -> dict:
+    """The out-of-sample summary over every fold's predictions: the measures, plus the Newey-West t-statistic and
+    share of positive days of the daily IC and of the daily decile long-short, and both by year."""
+    summary, ic_days = measures(scored, target)
+    spread_days = daily_decile_spread(scored["day"], scored["pred"], scored["ret_next"])
+    ic, spread = ic_summary(ic_days), ic_summary(spread_days)
+    summary.update({"ic_t": ic["ic_t"], "ic_positive": ic["ic_positive"], "days": ic["days"],
+                    "decile_spread": spread["ic_mean"],  # in return units
+                    "decile_spread_t": spread["ic_t"], "decile_spread_positive": spread["ic_positive"]})
+    for year, value in ic_days.groupby(ic_days.index.year).mean().items():
+        summary[f"ic_{year}"] = float(value)
+    for year, value in spread_days.groupby(spread_days.index.year).mean().items():
+        summary[f"spread_{year}_bp"] = 1e4 * float(value)
+    return summary

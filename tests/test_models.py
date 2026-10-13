@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dsr.models import _network, fit_predict
+from dsr.models import _network, fit, fit_predict
 
 
 def _data(n=4000, seed=0):
@@ -93,3 +93,21 @@ def test_mlp_layers_constant_or_decreasing_with_the_chosen_activation():
     assert sum(isinstance(m, torch.nn.GELU) for m in decreasing) == 3 and sum(isinstance(m, torch.nn.ReLU) for m in constant) == 3
     leaky = _network({**p, "activation": "leaky_relu"}, 17)
     assert sum(isinstance(m, torch.nn.LeakyReLU) for m in leaky) == 3
+
+
+def test_fit_returns_the_model_fit_predict_uses():
+    x, y = _data()
+    args = (x[:3000], y[:3000], x[3000:3500], y[3000:3500])
+    for kind, params in [("linear", {"alpha": 1e-3, "l1_ratio": 0.0}),
+                         ("lgbm", {"learning_rate": 0.1, "num_leaves": 7, "min_data_in_leaf": 20, "feature_fraction": 1.0,
+                                   "bagging_fraction": 1.0, "lambda_l2": 0.0, "linear_tree": True, "max_trees": 50,
+                                   "seeds": 2}),
+                         ("mlp", {"layers": 1, "width": 8, "dropout": 0.0, "learning_rate": 1e-2, "weight_decay": 0.0,
+                                  "batch_size": 512, "max_epochs": 3})]:
+        kw = {"device": "cpu"} if kind == "mlp" else {}
+        model = fit(kind, params, *args, **kw)
+        pred, info = fit_predict(kind, params, *args, x[3500:], **kw)
+        assert np.array_equal(model.predict(x[3500:]), pred) and model.info == info
+    # the linear model keeps its coefficients on the scaled features and target, and its Ridge penalty
+    linear = fit("linear", {"alpha": 1e-3, "l1_ratio": 0.0}, *args).linear
+    assert set(linear) == {"coef", "sd", "scale", "penalty"} and linear["penalty"] == 1e-3 * 3000

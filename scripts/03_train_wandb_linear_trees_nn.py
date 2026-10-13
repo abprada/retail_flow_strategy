@@ -96,7 +96,7 @@ def _(mo):
             "feature_fraction": {"min": 0.5, "max": 1.0},
             "bagging_fraction": {"min": 0.3, "max": 1.0},
             "lambda_l2": {"distribution": "log_uniform_values", "min": 0.01, "max": 100.0},
-            "linear_tree": {"values": [False, True]},
+            "linear_tree": {"value": False},  # constant leaves only (explanations/models/training.md)
             "max_trees": {"value": 2000},
             "seeds": {"value": 1},
         },

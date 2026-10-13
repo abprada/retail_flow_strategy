@@ -35,3 +35,12 @@ def test_feature_columns_leave_out_keys_targets_and_one_imbalance_rule():
             "ret_prev", "imb_mid_trades", "imb_bjzz_trades", "log_cap"]
     assert feature_columns(cols) == ["ret_prev", "imb_mid_trades", "log_cap"]
     assert feature_columns(cols, bjzz=True) == ["ret_prev", "imb_bjzz_trades", "log_cap"]
+
+
+def test_monthly_folds_predict_each_calendar_month_from_every_earlier_day():
+    days = pd.bdate_range("2014-01-01", "2023-12-31")
+    f = folds(days, first="2019-01-01", every="month")
+    assert len(f) == 60 and f[0].name == "2019-01" and f[-1].name == "2023-12"
+    assert f[1].train_days.max() < pd.Timestamp("2019-02-01") <= f[1].predict_days.min()
+    assert f[1].predict_days.max() < pd.Timestamp("2019-03-01")
+    assert sum(len(x.predict_days) for x in f) == (days >= "2019-01-01").sum()

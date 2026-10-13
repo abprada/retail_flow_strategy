@@ -1,9 +1,12 @@
-"""One fit-and-predict function for each model family, with the same inputs, so every model sees the same rows.
+"""One fit function for each model family, with the same inputs, so every model sees the same rows.
 
-fit_predict(kind, params, x_train, y_train, x_valid, y_valid, x_pred) returns the predictions for x_pred and a dict
-of what the fit chose. x_valid/y_valid is the early-stopping hold-out (the training window's last months): LightGBM
-and the MLP stop on it; the linear models ignore it.
+fit(kind, params, x_train, y_train, x_valid, y_valid) returns the fitted model (Fitted); fit_predict(..., x_pred)
+returns its predictions for x_pred and a dict of what the fit chose. x_valid/y_valid is the early-stopping hold-out
+(the training window's last months): LightGBM and the MLP stop on it; the linear models ignore it.
 """
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import lightgbm as lgb
 import numpy as np
@@ -16,38 +19,55 @@ EARLY_STOP_EPOCHS = 3  # the MLP stops after this many epochs without improving 
 ACTIVATIONS = {"relu": torch.nn.ReLU, "leaky_relu": torch.nn.LeakyReLU, "gelu": torch.nn.GELU}
 
 
+@dataclass
+class Fitted:
+    """A fitted model: predict(x) gives its predictions (averaged over its seeds), info what the fit chose, and
+    linear the linear model's coefficients and scaling (empty for the others)."""
+    predict: Callable[[np.ndarray], np.ndarray]
+    info: dict
+    linear: dict = field(default_factory=dict)
+
+
+def fit(kind: str, params: dict, x_train, y_train, x_valid, y_valid, device: str | None = None,
+        on_epoch=None) -> Fitted:
+    return {"linear": _linear, "lgbm": _lgbm, "mlp": _mlp}[kind](
+        params, x_train, y_train, x_valid, y_valid, **({"device": device, "on_epoch": on_epoch} if kind == "mlp" else {}))
+
+
 def fit_predict(kind: str, params: dict, x_train, y_train, x_valid, y_valid, x_pred, device: str | None = None,
                 on_epoch=None):
-    return {"linear": _linear, "lgbm": _lgbm, "mlp": _mlp}[kind](
-        params, x_train, y_train, x_valid, y_valid, x_pred,
-        **({"device": device, "on_epoch": on_epoch} if kind == "mlp" else {}))
+    model = fit(kind, params, x_train, y_train, x_valid, y_valid, device=device, on_epoch=on_epoch)
+    return model.predict(x_pred), model.info
 
 
-def _linear(p, x, y, xv, yv, xp):
+def _linear(p, x, y, xv, yv):
     """An elastic net, whose ends are the other linear models: alpha 0 is OLS (fitted directly: scikit-learn's elastic
     net solver is unreliable at 0), l1_ratio 0 Ridge, l1_ratio 1 LASSO. Fit on features scaled to unit variance on the
     training rows and the target scaled to unit variance
     (scaled back for the predictions), so a penalty means the same whatever the target's units. The penalty follows
     scikit-learn's elastic net, (1 / 2n) * squared errors + alpha * (l1_ratio * |w|_1 + (1 - l1_ratio) / 2 * |w|_2^2):
-    a Ridge with alpha * n on the sum of squared errors."""
+    a Ridge with alpha * n on the sum of squared errors. `linear` keeps the coefficients on the scaled features and
+    target, the scaling, and that Ridge penalty (0 for OLS; None for an L1 penalty, which has no such form)."""
     alpha, l1 = float(p["alpha"]), float(p["l1_ratio"])
     scale = float(np.std(y)) or 1.0
     # each column scaled by its training standard deviation, so the penalty treats every feature alike (the 0/1 flags
     # are not standardized in the panel); a constant column (early_close in a window without one) is left as it is
     sd = np.asarray(x).std(axis=0, dtype=np.float64)  # float64 sums without a float64 copy of x
     sd[sd == 0] = 1.0
-    x, xp = np.asarray(x) / sd.astype(np.float32), np.asarray(xp) / sd.astype(np.float32)
+    sd32 = sd.astype(np.float32)
     if alpha == 0:
-        model = LinearRegression()
+        model, penalty = LinearRegression(), 0.0
     elif l1 == 0:
-        model = Ridge(alpha=alpha * len(y))
+        model, penalty = Ridge(alpha=alpha * len(y)), alpha * len(y)
     else:
-        model = ElasticNet(alpha=alpha, l1_ratio=l1, max_iter=5000)
-    model.fit(x, np.asarray(y) / scale)
-    return model.predict(xp) * scale, {"nonzero": int(np.count_nonzero(model.coef_))}
+        model, penalty = ElasticNet(alpha=alpha, l1_ratio=l1, max_iter=5000), None
+    model.fit(np.asarray(x) / sd32, np.asarray(y) / scale)
+    return Fitted(lambda xp: model.predict(np.asarray(xp) / sd32) * scale,
+                  {"nonzero": int(np.count_nonzero(model.coef_))},
+                  {"coef": model.coef_, "sd": sd, "scale": scale, "penalty": penalty})
 
 
-def _lgbm(p, x, y, xv, yv, xp):
+def _lgbm(p, x, y, xv, yv):
     """Gradient-boosted trees, squared error, up to max_trees, stopped early on the hold-out. Row and feature
     sampling make a fit depend on its seed, so predictions are averaged over `seeds` fits (seeds 0, 1, ...; seed 0
     alone is a sweep run's model)."""
@@ -58,16 +78,16 @@ def _lgbm(p, x, y, xv, yv, xp):
         "bagging_fraction": p["bagging_fraction"], "bagging_freq": 1, "lambda_l2": p["lambda_l2"],
         "linear_tree": bool(p["linear_tree"]),
     }
-    preds, trees = [], []
+    boosters = []
     for seed in range(int(p.get("seeds", 1))):
         # a new Dataset per seed: the seed also sets how the Dataset bins the features
         train = lgb.Dataset(x, y, free_raw_data=True)
         valid = lgb.Dataset(xv, yv, reference=train)
         booster = lgb.train({**params, "seed": seed}, train, num_boost_round=int(p.get("max_trees", 2000)),
                             valid_sets=[valid], callbacks=[lgb.early_stopping(EARLY_STOP_TREES, verbose=False)])
-        preds.append(booster.predict(xp, num_iteration=booster.best_iteration))
-        trees.append(booster.best_iteration)
-    return np.mean(preds, axis=0), {"trees": float(np.mean(trees))}
+        boosters.append(booster.free_dataset())  # predicting doesn't need the binned training rows
+    return Fitted(lambda xp: np.mean([b.predict(xp, num_iteration=b.best_iteration) for b in boosters], axis=0),
+                  {"trees": float(np.mean([b.best_iteration for b in boosters]))})
 
 
 def _network(p, n_in):
@@ -90,7 +110,7 @@ def _device(device):
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
-def _mlp(p, x, y, xv, yv, xp, device=None, on_epoch=None):
+def _mlp(p, x, y, xv, yv, device=None, on_epoch=None):
     """A feed-forward network (_network), AdamW, squared error, trained on the Mac's GPU (mps)
     with the whole window held on it, stopped early on the hold-out. The target is scaled by its training standard
     deviation and scaled back. Predictions are averaged over `seeds` networks. After each epoch, `on_epoch` (if given)
@@ -98,9 +118,9 @@ def _mlp(p, x, y, xv, yv, xp, device=None, on_epoch=None):
     dev = _device(device)
     tensor = lambda a: torch.as_tensor(np.asarray(a, dtype=np.float32), device=dev)
     scale = float(np.std(y)) or 1.0
-    xt, yt, xvt, yvt, xpt = tensor(x), tensor(y) / scale, tensor(xv), tensor(yv) / scale, tensor(xp)
+    xt, yt, xvt, yvt = tensor(x), tensor(y) / scale, tensor(xv), tensor(yv) / scale
     batch = int(p["batch_size"])
-    preds, epochs = [], []
+    nets, epochs = [], []
     for seed in range(int(p.get("seeds", 1))):
         torch.manual_seed(seed)
         net = _network(p, xt.shape[1]).to(dev)
@@ -133,7 +153,14 @@ def _mlp(p, x, y, xv, yv, xp, device=None, on_epoch=None):
                     break
         net.load_state_dict(best_state)
         net.eval()
-        with torch.no_grad():
-            preds.append(torch.cat([net(xpt[i:i + 65536]).squeeze(1) for i in range(0, len(xpt), 65536)]).cpu().numpy())
+        nets.append(net)
         epochs.append(best_epoch)
-    return np.mean(preds, axis=0) * scale, {"epochs": float(np.mean(epochs))}
+
+    def predict(xp):
+        xpt = tensor(xp)
+        with torch.no_grad():
+            preds = [torch.cat([net(xpt[i:i + 65536]).squeeze(1) for i in range(0, len(xpt), 65536)]).cpu().numpy()
+                     for net in nets]
+        return np.mean(preds, axis=0) * scale
+
+    return Fitted(predict, {"epochs": float(np.mean(epochs))})
