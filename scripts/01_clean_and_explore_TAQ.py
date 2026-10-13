@@ -31,6 +31,7 @@ def _():
     from dsr.crsp import class_on, is_common_stock, read_name_records, security_type
     from dsr.taq_link import PILOT_END, PILOT_START, WHEN_ISSUED_SUFFIXES, link_permnos, mark_primary, pilot_groups
     from dsr.crsp import DAILY_COLUMNS as CRSP_COLUMNS
+    from dsr.panel import LARGE_CAP
     from dsr.taq_split import CAP_MIN, CODES, DOLLAR_VOLUME_MIN, DOLLARS_BEFORE_CUTOFF_MIN, PRICE_MIN, UNIVERSE_TYPES, stack_panels, stock_days, write_decision_days
 
     return (
@@ -38,6 +39,7 @@ def _():
         CODES,
         DOLLARS_BEFORE_CUTOFF_MIN,
         DOLLAR_VOLUME_MIN,
+        LARGE_CAP,
         PILOT_END,
         PILOT_START,
         PRICE_MIN,
@@ -740,6 +742,7 @@ def _(mo):
     2. **The Tick Size Pilot (2016-10 to 2018-09):** do the pilot stocks' retail counts work as they are, or do they need the half-cent rule or masking?
     3. **Retail measures over time:** do the sub-penny (BJZZ) and midpoint rules behave sensibly, including around fractional shares (2021-02-16) and the late reports of November 2021?
     4. **Usable stocks:** how many stocks trade enough each day to be usable, as input to the universe.
+    5. **The trading universe:** which stocks are liquid enough to trade, measured by what trading costs rather than by market cap (6.5).
     """)
     return
 
@@ -1361,6 +1364,176 @@ def _(
                                                           "facprc_t", "ret_1550", "crsp_ret"]]
     mo.vstack([mo.hstack([_fig, _summary], justify="start"), mo.md("**Largest gaps from CRSP's return**"), _largest])
     return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.5 The trading universe: what makes a stock liquid
+
+    **Purpose:** the models are scored and traded on the stocks whose previous market cap is at least $1B (`dsr.panel.LARGE_CAP`), and the target is demeaned separately within that group. Market cap stands in for what matters to a strategy that trades at the close every day: what a stock costs to trade, and how much of it can be traded. This section measures those directly, per stock and day, and compares candidate rules for the trading universe. The rules are compared on liquidity only, not on returns or model results, so the choice is made on cost grounds rather than on which universe backtests best. Training days only, on the stock-days that pass the cleaning rules (`train_daily_clean`).
+
+    **The measures**, each known by the decision day's 15:50:
+    - `cap`: the previous close's market cap, the current rule;
+    - `spread_today`: today's relative quoted spread, (ask − bid) / midpoint, averaged over the session's trades up to 15:50 (`spread_bp`). The spread at exactly 15:50 is not in the clean data (`bars` keeps only the midpoint) and would need a new pull;
+    - `spread_20d`: the median of `spread_today` over the last 20 trading days, today included, with at least 15 of them in the panel; steadier than a single day;
+    - `dollar_volume_20d`: the average CRSP dollar volume over the 20 trading days before, closing auctions included (the pull leaves auctions out): how much can be traded;
+    - `amihud_20d`: the average of |return| / dollar volume over the same days (Amihud 2002), in bp per $1M traded: how far trading moves the price.
+
+    **The rules compared** each take, every day, as many stocks as the $1B rule does, the most liquid by one measure, so all have the same breadth. For each rule: how many of its stocks are also above $1B, the spreads it admits (median and 90th percentile), the share of the day's dollar volume it covers, and how many of its names change from one day to the next, which a strategy pays for in trades.
+    """)
+    return
+
+
+@app.cell
+def _(LARGE_CAP, pd, train_daily, train_daily_clean):
+    _calendar = pd.DatetimeIndex(sorted(train_daily["day"].unique()))
+    _history = train_daily[["day", "permno"]].assign(  # every written stock-day, so the windows see the whole history
+        spread_today=train_daily["spread_bp"],
+        dollar_volume=train_daily["dollar_volume_prev"],  # the day before's, so a window ending today covers t-20 to t-1
+        amihud=train_daily["ret_prev"].abs() / train_daily["dollar_volume_prev"] * 1e10,  # bp per $1M traded
+    )
+    _keys = pd.MultiIndex.from_frame(train_daily_clean[["day", "permno"]])
+
+
+    def _trailing(_column, _how, _days=20, _at_least=15):
+        """Each stock's mean or median of a column over its last `_days` rows on the calendar, the current one
+        included, with at least `_at_least` of them in the panel (days out of the panel count as missing)."""
+        _wide = _history.pivot(index="day", columns="permno", values=_column).reindex(_calendar)
+        _rolled = getattr(_wide.rolling(_days, min_periods=_at_least), _how)()
+        return _rolled.stack().reindex(_keys).to_numpy()
+
+
+    liquidity = train_daily_clean[["day", "permno", "security_type", "price_prev", "dollar_volume_prev"]].assign(
+        cap=train_daily_clean["cap_prev"] / 1e3,  # $ millions
+        large=train_daily_clean["cap_prev"] >= LARGE_CAP,
+        spread_today=train_daily_clean["spread_bp"],
+        spread_20d=_trailing("spread_today", "median"),
+        dollar_volume_20d=_trailing("dollar_volume", "mean"),
+        amihud_20d=_trailing("amihud", "mean"),
+    ).reset_index(drop=True)
+    _q = [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99]
+    _measures = {"cap ($ millions)": liquidity["cap"], "spread today (bp)": liquidity["spread_today"],
+                 "spread, 20-day median (bp)": liquidity["spread_20d"],
+                 "dollar volume, 20-day average ($ millions)": liquidity["dollar_volume_20d"] / 1e6,
+                 "Amihud, 20-day average (bp per $1M)": liquidity["amihud_20d"]}
+    _table = pd.DataFrame({_n: _s.quantile(_q) for _n, _s in _measures.items()}).T
+    _table.columns = [f"{_x:.0%}" for _x in _q]
+    _table["empty"] = [int(_s.isna().sum()) for _s in _measures.values()]
+    _table["rank correlation with cap"] = [_s.corr(liquidity["cap"], method="spearman") for _s in _measures.values()]
+    _table.round(3)
+    return (liquidity,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **Market cap against spread.** Each stock-day's cap against its 20-day spread, with the $1B line and spreads of 10 and 20 bp marked. The table counts stocks per day (the average over the training days) in each cell of cap by spread: the $1B rule takes the three right-hand columns whatever their spread, and leaves out the two left-hand ones however tight theirs.
+    """)
+    return
+
+
+@app.cell
+def _(liquidity, mo, np, pd, plt):
+    _l = liquidity.dropna(subset=["spread_20d"])
+    _l = _l[_l["spread_20d"] > 0]
+    _fig, _ax = plt.subplots(figsize=(8, 6))
+    _hb = _ax.hexbin(np.log10(_l["cap"]), np.log10(_l["spread_20d"]), gridsize=120, bins="log", cmap="viridis", mincnt=1)
+    _ax.axvline(np.log10(1_000), color="w", lw=0.8)
+    for _bp in (10, 20):
+        _ax.axhline(np.log10(_bp), color="w", lw=0.6, ls="--")
+    _ax.set_xticks(np.log10([100, 300, 1_000, 3_000, 10_000, 100_000, 1_000_000]),
+                   ["$100M", "$300M", "$1B", "$3B", "$10B", "$100B", "$1T"])
+    _ax.set_yticks(np.log10([1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000]), ["1", "2", "5", "10", "20", "50", "100", "200", "500", "1,000"])
+    _ax.set_xlabel("previous market cap")
+    _ax.set_ylabel("spread, 20-day median (bp)")
+    _ax.set_title("Market cap against spread, training stock-days", fontsize=10)
+    plt.colorbar(_hb, ax=_ax, label="stock-days")
+    _cap = pd.cut(_l["cap"], [0, 300, 1_000, 3_000, 10_000, np.inf], right=False,
+                  labels=["$100M-300M", "$300M-1B", "$1B-3B", "$3B-10B", "over $10B"])
+    _spread = pd.cut(_l["spread_20d"], [0, 5, 10, 20, 50, np.inf], right=False,
+                     labels=["under 5 bp", "5-10 bp", "10-20 bp", "20-50 bp", "50 bp or more"])
+    _per_day = (pd.crosstab(_spread, _cap) / liquidity["day"].nunique()).round(0).astype(int)
+    _per_day.loc["all"] = _per_day.sum()
+    mo.hstack([_fig, mo.vstack([mo.md("**Stocks per day**, 20-day spread (rows) by cap (columns)"), _per_day])], justify="start")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **Over time.** Fixed thresholds give a universe whose size moves with the market: spreads widen in stress (COVID) and narrow as trading grows. Top: stocks per day under the $1B rule and under fixed spread and dollar-volume thresholds. Bottom: the median stock's spread today, above and below $1B.
+    """)
+    return
+
+
+@app.cell
+def _(liquidity, mark_events, pd, plt):
+    _counts = pd.DataFrame({
+        "cap ≥ $1B": liquidity["large"],
+        "20-day spread ≤ 10 bp": liquidity["spread_20d"] <= 10,
+        "20-day spread ≤ 20 bp": liquidity["spread_20d"] <= 20,
+        "20-day dollar volume ≥ $10M": liquidity["dollar_volume_20d"] >= 1e7,
+    }).groupby(liquidity["day"]).sum().iloc[19:]  # the 20-day measures need 15 days of history; from the 20th day
+    _medians = liquidity.groupby(["day", "large"])["spread_today"].median().unstack()
+    _fig, _axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    for _ax in _axes:
+        mark_events(_ax)
+    for _c in _counts:
+        _axes[0].plot(_counts.index, _counts[_c], lw=0.7, label=_c)
+    _axes[0].set_ylabel("stocks")
+    _axes[0].legend(fontsize=7, loc="upper left")
+    _axes[0].set_title("Stocks per day under each rule", fontsize=10)
+    _axes[1].plot(_medians.index, _medians[True], lw=0.6, label="cap ≥ $1B")
+    _axes[1].plot(_medians.index, _medians[False], lw=0.6, label="cap under $1B")
+    _axes[1].set_yscale("log")
+    _axes[1].set_ylabel("bp (log)")
+    _axes[1].legend(fontsize=7, loc="upper left")
+    _axes[1].set_title("Median spread today", fontsize=10)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **The rules side by side**, each taking the day's $1B count of the most liquid stocks by its measure (a stock without the measure that day, such as one with under 15 days of history, is left out). Averages over the training days; spreads and caps over the rule's stock-days.
+    """)
+    return
+
+
+@app.cell
+def _(liquidity, pd):
+    _days = pd.DatetimeIndex(sorted(liquidity["day"].unique()))
+    _n = liquidity.groupby("day")["large"].transform("sum")
+    _rank = lambda _m, _ascending: liquidity.groupby("day")[_m].rank(method="first", ascending=_ascending)
+    _rules = {
+        "cap ≥ $1B (current)": liquidity["large"],
+        "tightest spread today": _rank("spread_today", True) <= _n,
+        "tightest 20-day spread": _rank("spread_20d", True) <= _n,
+        "largest 20-day dollar volume": _rank("dollar_volume_20d", False) <= _n,
+        "lowest 20-day Amihud": _rank("amihud_20d", True) <= _n,
+    }
+    _dollars = liquidity.groupby("day")["dollar_volume_prev"].sum()
+    _rows = []
+    for _name, _in in _rules.items():
+        _s = liquidity[_in]
+        _member = _s.pivot(index="day", columns="permno", values="cap").reindex(_days).notna()
+        _new = (_member & ~_member.shift(1, fill_value=False)).sum(axis=1) / _member.sum(axis=1)
+        _rows.append({
+            "rule": _name,
+            "stocks a day": int(_s.groupby("day").size().median()),
+            "% also ≥ $1B": 100 * _s["large"].mean(),
+            "spread today, median (bp)": _s["spread_today"].median(),
+            "spread today, 90th percentile (bp)": _s["spread_today"].quantile(0.9),
+            "cap, median ($ millions)": _s["cap"].median(),
+            "% of the day's dollar volume": 100 * (_s.groupby("day")["dollar_volume_prev"].sum() / _dollars).mean(),
+            "% of names new each day": 100 * _new.iloc[1:].mean(),
+        })
+    liquidity_rules = pd.DataFrame(_rows).set_index("rule").round(1)
+    liquidity_rules
+    return (liquidity_rules,)
 
 
 if __name__ == "__main__":
