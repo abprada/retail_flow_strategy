@@ -4,10 +4,11 @@ sample."""
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 MIN_TRAIN_YEARS = 5
-KEYS = ("day", "permno", "ret_next", "cap_prev", "large_cap")  # the panel's columns that are not features
+KEYS = ("day", "permno", "ret_next", "cap_prev", "large_cap", "spread_20d")  # the panel's columns that are not features
 MID, BJZZ = ("imb_mid_trades",), ("imb_bjzz_trades",)  # the retail imbalance by each signing rule
 
 
@@ -34,6 +35,22 @@ def folds(days, first: str, every: str) -> list[Fold]:
 def last_months(days: pd.DatetimeIndex, months: int) -> pd.DatetimeIndex:
     """The days in the last `months` months of a training window: the early-stopping hold-out."""
     return days[days > days.max() - pd.DateOffset(months=months)]
+
+
+def fold_rows(day, y, universe, fold: Fold, hold_out_months: int, holds_out: bool, train_rows: str = "all"):
+    """One fold's rows, as boolean masks over the panel: the rows the model is fit on, its early-stopping hold-out
+    (the training window's last `hold_out_months` months) and the rows it predicts. It trains on rows with a target,
+    all of them ("all") or only those in the trading universe on their own day ("universe": `universe` true), the
+    hold-out included. A model that doesn't hold out (`holds_out` false: the linear models) is fit on the whole
+    window. It predicts every row of the period, in the universe or not."""
+    if train_rows not in ("all", "universe"):
+        raise ValueError(f"train_rows is 'all' or 'universe', not {train_rows!r}")
+    in_days = lambda d: np.isin(day, d.to_numpy().astype(day.dtype))
+    train = in_days(fold.train_days) & ~np.isnan(y)
+    if train_rows == "universe":
+        train &= universe
+    hold = train & in_days(last_months(fold.train_days, hold_out_months))
+    return (train & ~hold if holds_out else train), hold, in_days(fold.predict_days)
 
 
 def feature_columns(columns, bjzz: bool = False) -> list[str]:

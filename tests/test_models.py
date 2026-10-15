@@ -93,6 +93,9 @@ def test_mlp_layers_constant_or_decreasing_with_the_chosen_activation():
     assert sum(isinstance(m, torch.nn.GELU) for m in decreasing) == 3 and sum(isinstance(m, torch.nn.ReLU) for m in constant) == 3
     leaky = _network({**p, "activation": "leaky_relu"}, 17)
     assert sum(isinstance(m, torch.nn.LeakyReLU) for m in leaky) == 3
+    # deep and narrow: halving stops at MIN_UNITS instead of reaching 0
+    deep = _network({"layers": 6, "width": 16, "dropout": 0.1, "shape": "decreasing"}, 17)
+    assert sizes(deep) == [(17, 16), (16, 8), (8, 4), (4, 4), (4, 4), (4, 4), (4, 1)]
 
 
 def test_fit_returns_the_model_fit_predict_uses():

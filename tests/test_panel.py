@@ -5,8 +5,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from dsr.panel import (
-    BINARY_FEATURES, WINDOW_COLUMNS, crsp_windows, family_a, family_b, family_c, family_d, session_prices, targets,
-    window_sums,
+    BINARY_FEATURES, WINDOW_COLUMNS, crsp_windows, family_a, family_b, family_c, family_d, session_prices, spread_20d,
+    targets, window_sums,
 )
 
 
@@ -17,13 +17,15 @@ def test_targets_rank_within_day_and_size_group_and_leave_rows_without_a_return_
         "cap_prev": [2_000_000.0] * 5 + [500_000.0] * 5 + [2_000_000.0],
         "ret_next": [0.01, 0.02, 0.03, 0.04, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, np.nan],
     })
-    t = targets(panel)
+    spread = [5.0] * 5 + [50.0] * 4 + [np.nan] + [5.0]
+    t = targets(panel, spread)
     assert list(t.index) == list(panel.index)
     # each group of 5 is ranked on its own: the top stock of each group gets the same target
     assert t.loc[4, "target_rank"] == pytest.approx(t.loc[9, "target_rank"])
     assert t.loc[0, "target_rank"] == pytest.approx(-t.loc[4, "target_rank"])
     assert list(t["target_class"].iloc[:5]) == [-1, 0, 0, 0, 1]
     assert t["large_cap"].tolist() == [True] * 5 + [False] * 5 + [True]
+    assert t["spread_20d"].to_numpy() == pytest.approx(np.array(spread), nan_ok=True)  # kept as it is, for costs
     # demeaned within the day and size group (each group winsorized on its own, symmetric here, so the means stay
     # 0.03 and 0.30)
     big, small = np.array([0.01, 0.02, 0.03, 0.04, 0.05]), np.array([0.10, 0.20, 0.30, 0.40, 0.50])
@@ -159,7 +161,20 @@ def test_family_d_logs_size_and_price_and_keeps_the_flags_as_0_or_1():
 def test_target_demeaned_is_winsorized_at_1_and_99_percent_within_the_day_and_group_before_demeaning():
     day = pd.Timestamp("2020-01-02")
     rets = np.r_[np.linspace(-0.05, 0.05, 199), 5.0]  # one +500% stock among 200 large caps
-    t = targets(pd.DataFrame({"day": day, "cap_prev": 2_000_000.0, "ret_next": rets}))
+    t = targets(pd.DataFrame({"day": day, "cap_prev": 2_000_000.0, "ret_next": rets}), np.full(200, 5.0))
     clipped = np.clip(rets, np.quantile(rets, 0.01), np.quantile(rets, 0.99))
     assert t["target_demeaned"].to_numpy() == pytest.approx(clipped - clipped.mean())
     assert t["target_demeaned"].max() < 0.06
+
+
+def test_spread_20d_is_the_median_over_the_last_20_days_including_the_decision_day():
+    calendar = pd.bdate_range("2020-01-01", periods=30)
+    # stock 1 every day, its spread rising by 1 bp a day; stock 2 on the last 15 days only, with one day out
+    one = pd.DataFrame({"day": calendar, "permno": 1, "spread_bp": np.arange(30.0)})
+    two = pd.DataFrame({"day": calendar[15:].delete(3), "permno": 2, "spread_bp": 10.0})
+    spreads = pd.concat([one, two], ignore_index=True)
+    panel = pd.DataFrame({"day": [calendar[25], calendar[14], calendar[13], calendar[29]], "permno": [1, 1, 1, 2]})
+    s = spread_20d(panel, spreads, calendar)
+    assert s[0] == np.median(np.arange(6.0, 26.0))  # days 6 to 25: the decision day in, no later day
+    assert s[1] == np.median(np.arange(0.0, 15.0))  # 15 days of history are enough
+    assert np.isnan(s[2]) and np.isnan(s[3])  # 14 are not, whether the window is young or has a day out

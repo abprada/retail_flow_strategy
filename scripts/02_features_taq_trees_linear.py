@@ -66,27 +66,34 @@ def _(mo):
     mo.md(r"""
     ## 2. Targets
 
-    All three are made from `ret_next` within each day and size group: the stocks with previous cap of $1B or more (`large_cap`, the ones traded) among themselves, the others among themselves.
+    All three are made from `ret_next` within each day and size group: the stocks with previous cap of $1B or more (`large_cap`, the trading universe, the ones traded) among themselves, the others among themselves.
 
     - **`target_demeaned`** (baseline, regression): `ret_next` winsorized at the group's 1st and 99th percentiles that day, minus the group's average of the winsorized returns. Unclipped, a few news-driven stock-days (up to +650%) would steer a squared-error fit.
     - **`target_rank`** (challenger, regression): each stock's position u = (rank − 0.5) ÷ n (tied returns share their average rank), mapped to a standard normal.
     - **`target_class`** (challenger, three classes): 1 in the top quintile (u ≥ 0.8), −1 in the bottom (u < 0.2), 0 in the middle 60%. The models sort on P(top) − P(bottom).
 
-    `ret_next` and `cap_prev` stay too, to compute the long-short's return and value weights. Rows without `ret_next` stay with no target: dropping them would pick stocks by what happened after the decision.
+    `ret_next`, `cap_prev` and `spread_20d` stay too, to compute the long-short's return, value weights and trading costs. `spread_20d` is each stock's median relative quoted spread over the last 20 trading days, the decision day's to the cutoff included (at least 15 of the days; `scripts/01_clean_and_explore_TAQ.py`, section 6.5); the windows run across the train/test boundary, since they look only backwards. Rows without `ret_next` stay with no target: dropping them would pick stocks by what happened after the decision.
     """)
     return
 
 
 @app.cell
-def _(PERIODS, build, panels):
-    targets = {_p: build.targets(panels[_p]) for _p in PERIODS}
-    targets["train"].groupby("large_cap").agg(
-        demeaned_mean=("target_demeaned", "mean"), demeaned_sd=("target_demeaned", "std"),
-        rank_mean=("target_rank", "mean"), rank_sd=("target_rank", "std"),
-        top=("target_class", lambda s: s.eq(1).fillna(False).mean()),
-        middle=("target_class", lambda s: s.eq(0).fillna(False).mean()),
-        bottom=("target_class", lambda s: s.eq(-1).fillna(False).mean()),
-    ).round(4)
+def _(CALENDAR, PERIODS, build, mo, panels, pd):
+    _spreads = pd.concat([panels[_p][["day", "permno", "spread_bp"]] for _p in PERIODS], ignore_index=True)
+    targets = {_p: build.targets(panels[_p], build.spread_20d(panels[_p], _spreads, CALENDAR)) for _p in PERIODS}
+    _t = targets["train"]
+    _per_day = _t.groupby([panels["train"]["day"], _t["large_cap"]]).size().unstack(fill_value=0)
+    mo.vstack([
+        mo.md(f"**Stocks of $1B or more per training day:** median {int(_per_day[True].median()):,} of "
+              f"{int(_per_day.sum(axis=1).median()):,} (fewest {int(_per_day[True].min()):,}, most {int(_per_day[True].max()):,})"),
+        _t.groupby("large_cap").agg(
+            demeaned_mean=("target_demeaned", "mean"), demeaned_sd=("target_demeaned", "std"),
+            rank_mean=("target_rank", "mean"), rank_sd=("target_rank", "std"),
+            top=("target_class", lambda s: s.eq(1).fillna(False).mean()),
+            middle=("target_class", lambda s: s.eq(0).fillna(False).mean()),
+            bottom=("target_class", lambda s: s.eq(-1).fillna(False).mean()),
+        ).round(4),
+    ])
     return (targets,)
 
 
@@ -195,7 +202,7 @@ def _(mo):
     ## 6. Family D: context
 
     - `log_cap`, log(`cap_prev`); `log_price`, log(|`price_prev`|) (a negative CRSP price is a bid/ask midpoint).
-    - 0/1 flags: `is_foreign`, `is_adr`, `is_reit` (the base is common stock), `early_close`. They are not winsorized or standardized: that would turn a rare 1 into 0, and `early_close`, the same for every stock that day, into 0. Trees and networks can use them to tell where the other features work. `large_cap` is already in the panel.
+    - 0/1 flags: `is_foreign`, `is_adr`, `is_reit` (the base is common stock), `early_close`. They are not winsorized or standardized: that would turn a rare 1 into 0, and `early_close`, the same for every stock that day, into 0. Trees and networks can use them to tell where the other features work. `large_cap` is already in the panel, as a key, not a feature.
     """)
     return
 
@@ -270,7 +277,7 @@ def _(mo):
 def _(PERIODS, mo, np, panel, pd):
     FEATURES_DROPPED = ["trades", "dollars", "spread", "log_price", "retail_trades", "dollars_abnormal",
                         "imb_mid_dollars", "imb_bjzz_dollars", "range_today"]  # chosen on train, dropped from test unchanged
-    _keys = ["day", "permno", "ret_next", "cap_prev", "large_cap", "target_demeaned", "target_rank", "target_class"]
+    _keys = ["day", "permno", "ret_next", "cap_prev", "large_cap", "spread_20d", "target_demeaned", "target_rank", "target_class"]
     model_panel = {_p: panel[_p].drop(columns=FEATURES_DROPPED) for _p in PERIODS}
     _use = [_c for _c in model_panel["train"].columns if _c not in _keys and "bjzz" not in _c and _c != "early_close"]
     feature_corr = model_panel["train"][_use].astype("float64").corr()

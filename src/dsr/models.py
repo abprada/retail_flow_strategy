@@ -17,6 +17,7 @@ THREADS = 16  # of the M5 Pro's 18 cores
 EARLY_STOP_TREES = 50  # LightGBM stops after this many trees without improving the hold-out
 EARLY_STOP_EPOCHS = 3  # the MLP stops after this many epochs without improving the hold-out
 ACTIVATIONS = {"relu": torch.nn.ReLU, "leaky_relu": torch.nn.LeakyReLU, "gelu": torch.nn.GELU}
+MIN_UNITS = 4  # a decreasing network's narrowest layer (v3's best ended at 4: 32, 16, 8, 4)
 
 
 @dataclass
@@ -93,12 +94,13 @@ def _lgbm(p, x, y, xv, yv):
 def _network(p, n_in):
     """`layers` hidden layers, each a linear layer, its activation (ReLU, LeakyReLU or GELU) and dropout, then one
     output. The hidden layers all have `width` units ("constant" shape) or halve layer by layer from `width`
-    ("decreasing": 256, 128, 64, ...). Runs before these settings existed used constant ReLU layers."""
+    ("decreasing": 256, 128, 64, ...), not below MIN_UNITS. Runs before these settings existed used constant ReLU
+    layers."""
     activation = ACTIVATIONS[p.get("activation", "relu")]
     decreasing = p.get("shape", "constant") == "decreasing"
     layers, width_in = [], n_in
     for k in range(int(p["layers"])):
-        width = int(p["width"]) // 2 ** k if decreasing else int(p["width"])
+        width = max(int(p["width"]) // 2 ** k, MIN_UNITS) if decreasing else int(p["width"])
         layers += [torch.nn.Linear(width_in, width), activation(), torch.nn.Dropout(p["dropout"])]
         width_in = width
     return torch.nn.Sequential(*layers, torch.nn.Linear(width_in, 1))

@@ -16,20 +16,33 @@ from scipy import stats
 from dsr.features import LOWER, UPPER
 
 LARGE_CAP = 1_000_000  # $1B: validate and trade on these; CRSP's cap is in thousands of dollars
+SPREAD_DAYS, SPREAD_AT_LEAST = 20, 15  # the spread's window, and the days of it a stock needs in the panel
 SESSION_BARS = {False: 38, True: 20}  # ten-minute bars from 09:30 to the cutoff, 15:50 (12:50 on early closes)
 _BARS = pa.schema([("permno", pa.int64()), ("bar", pa.int64()),
                    ("high", pa.float64()), ("low", pa.float64()), ("close", pa.float64())])
 
 
-def targets(panel: pd.DataFrame) -> pd.DataFrame:
-    """ret_next and cap_prev, the large_cap flag, and the three targets, aligned with panel (day, cap_prev, ret_next).
+def spread_20d(panel: pd.DataFrame, spreads: pd.DataFrame, calendar: pd.DatetimeIndex) -> np.ndarray:
+    """Each row's median relative quoted spread (`spread_bp`, in bp) over its stock's last SPREAD_DAYS trading days of
+    the calendar, the decision day included (its spread runs to the cutoff), with at least SPREAD_AT_LEAST of them in
+    spreads (days out of the universe count as missing); aligned with panel (day, permno). spreads: day, permno and
+    spread_bp for every day the windows need (train and test together: they look only backwards)."""
+    wide = spreads.pivot(index="day", columns="permno", values="spread_bp").reindex(calendar)
+    median = wide.rolling(SPREAD_DAYS, min_periods=SPREAD_AT_LEAST).median()
+    return median.stack().reindex(pd.MultiIndex.from_frame(panel[["day", "permno"]])).to_numpy()
+
+
+def targets(panel: pd.DataFrame, spread: np.ndarray) -> pd.DataFrame:
+    """ret_next and cap_prev, the large_cap flag (the trading universe), the 20-day spread (spread_20d, spread_20d's
+    output for these rows, kept for trading costs) and the three targets, aligned with panel (day, cap_prev, ret_next).
 
     All are made within each day and size group (large_cap or not). target_demeaned (the baseline) is ret_next
     winsorized at the group's 1st and 99th percentiles that day, minus the group's average of the winsorized returns. For the other two, ret_next is ranked into u = (rank - 0.5) / n, ties sharing their
     average rank: target_rank is u mapped to a standard normal; target_class is 1 for u >= 0.8 (top quintile), -1 for
     u < 0.2 (bottom quintile) and 0 in between. Rows without ret_next get none.
     """
-    out = panel[["ret_next", "cap_prev"]].assign(large_cap=panel["cap_prev"] >= LARGE_CAP)
+    out = panel[["ret_next", "cap_prev"]].assign(large_cap=panel["cap_prev"] >= LARGE_CAP,
+                                                 spread_20d=np.asarray(spread, dtype=float))
     g = out.groupby([panel["day"], out["large_cap"]])["ret_next"]
     clipped = out["ret_next"].clip(g.transform("quantile", LOWER), g.transform("quantile", UPPER))
     out["target_demeaned"] = clipped - clipped.groupby([panel["day"], out["large_cap"]]).transform("mean")
