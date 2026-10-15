@@ -7,7 +7,7 @@ What `scripts/02_robintrack_returns.py` does: does the change in Robinhood holde
 
 ## Features
 
-The holder count for a day is the first Robintrack reading retrieved between 15:40 and 15:50 New York time, the last one before the cutoff. g is the daily % change in holders, from one trading day's count to the next. Every feature ends at day t-1, so it is known by 15:50 on day t.
+The holder count for a day is the first Robintrack reading retrieved between 15:40 and 15:50 New York time, the last one before the cutoff. g is the daily % change in holders, from one trading day's count to the next. Days on which a stock received another stock's holders (the acquirer in a stock merger, a new spin-off; trading days 0 to 5 from the event) have no change, because that rise is delivery, not trading. Every feature ends at day t-1, so it is known by 15:50 on day t.
 
 | Feature | Definition |
 |---|---|
@@ -31,11 +31,11 @@ The holder count for a day is the first Robintrack reading retrieved between 15:
 
 | X | OLS alone | Fama-MacBeth alone | OLS together | Fama-MacBeth together |
 |---|---|---|---|---|
-| level | -3.10 (-4.12) | -2.92 (-3.90) | -2.02 (-2.73) | -1.76 (-2.46) |
-| vol60 | -1.70 (-2.45) | -1.38 (-1.90) | -1.02 (-1.40) | -0.47 (-0.55) |
-| sqdev20 | -3.17 (-4.33) | -3.03 (-4.16) | -1.97 (-2.57) | -2.34 (-2.81) |
+| level | -3.10 (-4.13) | -2.93 (-3.90) | -2.04 (-2.74) | -1.76 (-2.46) |
+| vol60 | -1.71 (-2.47) | -1.39 (-1.91) | -1.03 (-1.40) | -0.46 (-0.54) |
+| sqdev20 | -3.17 (-4.32) | -3.02 (-4.14) | -1.97 (-2.58) | -2.34 (-2.83) |
 
-β in bp per sd, t in brackets. "Together" runs on 901,357 rows: 344 days with a median of 2,650 stocks, and an average daily R² of 0.42%.
+β in bp per sd, t in brackets. "Together" runs on 901,139 rows: 344 days with a median of 2,650 stocks, and an average daily R² of 0.42%.
 
 ## Lasso, 10-fold cross-validation (train)
 
@@ -53,30 +53,30 @@ The holder count for a day is the first Robintrack reading retrieved between 15:
 
 | | Inside train (223 days, pseudo out of sample) | Test (141 days, 2019-12-12 to 2020-08-12) |
 |---|---|---|
-| Mean, bp/day (NW t) | 3.2 (1.43) | 2.0 (0.21) |
-| Sharpe | 1.64 | 0.30 |
+| Mean, bp/day (NW t) | 3.2 (1.43) | 2.1 (0.22) |
+| Sharpe | 1.64 | 0.32 |
 | Annual volatility | 4.9% | 16.4% |
-| Maximum drawdown | -3.4% | -16.5% |
-| Hit rate | 51% | 56% |
+| Maximum drawdown | -3.5% | -16.6% |
+| Hit rate | 51% | 55% |
 | Turnover per day (gross 2) | 2.41 | 2.30 |
-| Break-even cost per unit of turnover | 1.3 bp | 0.85 bp |
-| Alpha against the universe, bp/day (t) | 3.7 (1.79) | 2.9 (0.31) |
-| Mean daily IC (NW t) | 0.0070 (3.71) | 0.0045 (0.82) |
+| Break-even cost per unit of turnover | 1.3 bp | 0.90 bp |
+| Alpha against the universe, bp/day (t) | 3.7 (1.79) | 3.0 (0.32) |
+| Mean daily IC (NW t) | 0.0070 (3.69) | 0.0046 (0.82) |
 
 **Betas on the test period only, together:**
 
 | X | Pooled OLS (t) | Fama-MacBeth (NW t) |
 |---|---|---|
-| level | -5.04 (-2.08) | -4.98 (-1.57) |
-| vol60 | +5.98 (+2.16) | +6.79 (+2.35) |
-| sqdev20 | -10.39 (-4.80) | -10.03 (-3.58) |
+| level | -4.98 (-2.04) | -4.91 (-1.55) |
+| vol60 | +6.01 (+2.16) | +6.81 (+2.34) |
+| sqdev20 | -10.44 (-4.83) | -10.06 (-3.60) |
 
 ## Reading
 
 - **sqdev20 passes out of sample.** On data never used to choose it, its beta is significant and about five times its in-sample beta together (-10.4 against -2.0). Surprise retail flow predicts lower next-day returns, more strongly during the 2020 retail surge.
 - **level keeps its sign.** It is negative on test too, significant in pooled OLS but not in Fama-MacBeth.
 - **vol60 flips sign in the test period,** and the expanding-window ridge keeps its old negative weight.
-- **The combined strategy is not significant on test.** March and April 2020 lose 4.8% and 6.5%, the worst days are 23 and 24 March, and May to August recover about 17%.
+- **The combined strategy is not significant on test.** March and April 2020 lose 4.8% and 6.4%, the worst days are 23 and 24 March, and May to August recover about 17%.
 - **Costs dominate.** Even inside train, the break-even is 1.3 bp per unit of turnover at about 2.4 turnover a day.
 - **For the plan:** the target passes the check "does it predict returns at all?". That justifies building Model 1. Its value has to show as incremental IC in Model 2 over the tape features, measured on data after 2020, since the Robintrack test period is now used.
 

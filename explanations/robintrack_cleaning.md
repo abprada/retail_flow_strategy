@@ -13,7 +13,7 @@ How `scripts/01_clean_explore_robintrack.py` turns raw Robintrack and CRSP files
 | CRSP `stocknames_v2` | ticker, name, CUSIP and classification history per PERMNO |
 | CRSP `stkdistributions`, `stkdelists`, `metaflaginfo` | splits, spin-offs, merger and liquidation payments, delistings, and what each code means |
 | CRSP `dsi` | the trading calendar |
-| CRSP `stkdlysecuritydata` | daily returns, prices, volume and market cap, 2017 onwards |
+| CRSP `stkdlysecuritydata` | daily returns, prices, volume and market cap; the file runs from 2013 (for the TAQ sample), and the notebook keeps the Robintrack days and the trading day on each side |
 
 ## 2. From tickers to PERMNOs
 
@@ -44,23 +44,25 @@ C5 keeps drops from 1 to 9 holders, which look real; any cut-off from 5 to 13 fl
 - **The day's count is the first reading retrieved 15:40 to 15:50 ET,** the last one known before the 15:50 market-on-close cutoff. With the lag, it shows holdings at about 15:00 to 15:25 ET. Readings retrieved at 15:50 or later are after the cutoff and are never used, and there is no fallback to an earlier sweep.
 - **Daily changes run from the previous trading day's count to today's.** Both ends are known before the cutoff and are taken at the same time of day.
 
-## 5. Corporate events (recorded, not applied)
+## 5. Corporate events (recorded; delivery days applied)
 
 3,634 CRSP events on 1,622 PERMNOs inside the Robintrack period: splits, reverse splits, stock dividends, spin-offs, mergers, liquidations, delistings, and ticker, name and CUSIP changes. Counterparties are listed too, such as the acquirer in a stock merger or the new company in a spin-off. CRSP has no announcement date for mergers or delistings.
 
-Event rows are kept; nothing is excluded around them. On train:
+Event rows are kept, with one exception: delivery days (below). On train:
 
 - **Forward splits:** holders rise on the day, by 7% on average (median 4%, 16 splits above 100 holders), and keep climbing. Retail buying the cheaper shares.
 - **Reverse splits:** holders drop about 30% on the day (mean −29%, median −33%, 7 reverse splits above 100 holders), consistent with holders of fewer shares than the ratio being cashed out. Kept anyway.
 - **Spin-off parents:** holders jump around the ex-date, with heavy volume. Retail buying the apparent price drop: flow.
-- **Spin-off children:** holders climb smoothly with volume rather than in one delivery step. Flow.
+- **Spin-off children:** the new company's shares are handed to the parent's holders. Its first trading days are delivery days (below).
 - **Ticker, name and CUSIP changes:** no effect once matched by PERMNO. The large moves are reverse splits and mergers under another label.
-- **Stock-merger acquirers:** holders rise roughly one to one with the target's last count over the days after the merger. Positions are converted, not bought. Left in, because it touches only a handful of rows above 100 holders and the daily clipping caps them.
+- **Stock-merger acquirers:** holders rise roughly one to one with the target's last count over the days after the merger. Positions are converted, not bought.
+
+**Delivery days (T2a).** For every CRSP event where a stock is the counterparty, meaning another stock's holders received its shares (the acquirer in a stock merger, a new spin-off), trading days 0 to 5 from the event date are delivery days. They get no daily change, so they are in neither Model 1's target nor the holder features. The event date is known only afterwards, which is fine because the marking only removes rows from a label and its history; it is never an input. On the full sample: 869 delivery stock-days on 125 PERMNOs (652 merger, 217 spin-off), 641 of them with a count, 332 above 100 holders. The holder panel loses 167 training rows and 165 test rows; the return panel keeps its rows, with those days' changes missing from its features.
 
 ## 6. Daily data
 
 - **T1, daily counts:** one per PERMNO per trading day, the first reading in the 15:40 to 15:50 window. Each count carries a **segment** that changes at every C2 break and after every C5 run. 34 trading days have no count at all (the outages, and days the 15:40 sweep did not reach any stock before 15:50).
-- **T2, daily changes:** taken only between consecutive trading days that both have a count in the same segment, with a previous count above 0. Otherwise the change is missing and a status says why. A change never spans an outage.
+- **T2, daily changes:** taken only between consecutive trading days that both have a count in the same segment, with a previous count above 0, and not on a delivery day. Otherwise the change is missing and a status says why. A change never spans an outage.
 - **CRSP join:** columns are named by when they are known: `*_prev` (day t-1, known at 15:50), `*_t` (only after day t's close), and `ret_next` (day t's close to the next trading day's close, the return to predict). Prices are as traded, never split-adjusted, because CRSP's adjustment factors carry later splits back in time. Delisting returns are part of CRSP's daily returns. A delisting payoff (`DD`) is kept and flagged, because it can span more than one day.
 
 ## 7. Filters from the literature
@@ -121,5 +123,5 @@ Train and test go to separate files, so estimation (`02_robintrack_returns.py`) 
 ## Open items
 
 - **Partial sweeps:** on 2019-08-30 and on five days in March 2020 the sweep reached only 58% to 69% of a normal day's stocks by 15:50. Which stocks are missing depends on how far the sweep had got, not on their holders. Those days are kept.
-- **Corporate events are not treated** (see section 5). Merger conversions into the acquirer are known not to be flow; they could be netted out with the target's last holder count if they turn out to matter.
+- **Only delivery days are treated** (see section 5). Other events stay in. The 0-to-5-day window is from the train finding that conversions take about five days.
 - **Market cap** uses CRSP's share count, which can be dated before it was public.

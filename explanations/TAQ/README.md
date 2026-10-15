@@ -4,8 +4,27 @@ NYSE's Daily TAQ (Trade and Quote) is every trade and quote printed on the US co
 
 - **Layout:** one table per day and file type, named `<type>_YYYYMMDD`, e.g. `ctm_20190604`.
 - **Download:** `scripts/00_fetch_TAQ.py` saves WCT and the master file for one day, unchanged, in `data/raw/taq/<date>/`. So far that is one full day, 2019-06-04, inside the Robintrack training period. The full sample will not be downloaded as trades; its features will be aggregated in SQL on WRDS.
-- **Notebook:** `scripts/01_explore_and_clean_TAQ.py` shows the head of each raw file and gives every trade its CUSIP and PERMNO.
+- **The full pull:** what it computes is in [../taq_pull.md](../taq_pull.md), how it runs on WRDS Cloud is in [wrds_cloud.md](wrds_cloud.md), and what it wrote (each table, each column, sizes and values) is in [pulled_data_full.md](pulled_data_full.md).
+- **Notebook:** `scripts/01_clean_and_explore_TAQ_raw_trades.py` shows the head of each raw file and gives every trade its CUSIP and PERMNO.
 - **Definitions:** the column meanings and codes come from NYSE's *Daily TAQ Client Specification* (v3.3). Counts are from 2019-06-04: the full day, or, in [trades.md](trades.md) and [nbbo.md](nbbo.md), a first test minute (15:49).
+
+## Sample period: from January 2014
+
+The TAQ features start on the first trading day of 2014 (2014-01-02) and run to the end of the sample, about 3,000 trading days. Retail trades can be found in TAQ through their sub-penny prices from 2005 onwards, but the years before 2014 measure something different:
+
+| Period | Problem |
+|---|---|
+| 2005 to 2009 | Reg NMS took effect in 2005, the sub-penny quoting ban (Rule 612) on 2006-01-31, and the FINRA trade reporting facilities that print off-exchange trades (`ex = 'D'`) opened in August and November 2006. Sub-penny trades rise strongly for several years as brokers take up sub-penny price improvement, and level off only after 2009 (BJZZ 2021, section I.A). A sub-penny count over these years mostly tracks that adoption, not retail demand |
+| 2010 to mid-2011 | two dark pools (Credit Suisse and UBS) executed orders at sub-penny prices in violation of Reg NMS, about 0.5% of share volume; their trades look retail and cannot be told apart in TAQ (BJZZ, who rerun their results on 2012 to 2015 for this reason) |
+| to 2013-12-06 | **odd lots** (trades under 100 shares) are not on the consolidated tape (below) |
+
+**Odd lots.** US stocks trade in round lots of 100 shares; a trade of fewer is an odd lot. Until December 2013 odd-lot trades were reported but not published on the consolidated tape, so TAQ does not have them. O'Hara, Yao & Ye ("What's Not There: The Odd-Lot Bias in TAQ Data", *Journal of Finance* 2014) showed that this hid about 19% of trades at the median stock, up to 66% in some (mostly high-priced) stocks, and about 30% of price discovery, because algorithms slice large orders below 100 shares. From 2013-12-09 odd lots are on the tape, with sale condition `I`.
+- Retail investors trade in small sizes: BJZZ estimate that marketable retail is about a third of odd-lot share volume, and they include odd lots only from January 2014.
+- Before then a sub-penny retail count misses those trades, most of all in high-priced stocks. The same code would measure a different thing before and after the change, and the gap differs across stocks, so it cannot be scaled away.
+
+**What remains after 2014:**
+- The Tick Size Pilot (October 2016 to October 2018) changed sub-penny pricing in its test groups; those stocks are dropped while in groups G2 and G3 (see [cleaning_spec.md](cleaning_spec.md)).
+- The market keeps changing: zero commissions from October 2019, the retail surge of 2020, fractional shares that print as one-share odd lots from 2021. Ardia, Aymard & Cenesizoglu (2024) find BJZZ's return results weaker in 2016 to 2021 than in 2010 to 2015. These are left to the model, not cut from the sample.
 
 ## Tables for one day
 
