@@ -4,8 +4,11 @@ Research code for predicting next-day cross-sectional US stock returns: how stoc
 
 ## Layout
 
-- `scripts/00_data_*.py` download raw data into `data/raw/` unchanged (Robintrack holder counts; CRSP names and corporate events from WRDS). They never modify the data.
-- `scripts/01_clean_*.py` are marimo notebooks that explore and clean the raw data and write to `data/intermediate/`.
+Scripts are grouped by source; their number prefix gives the order they run in.
+
+- `scripts/data_acquisition/` downloads raw data into `data/raw/` unchanged: TAQ (the full pull runs on WRDS Cloud, `wrds_cloud/`), Robintrack holder counts, and CRSP names, daily data and corporate events from WRDS. Nothing there modifies the data.
+- `scripts/taq/` and `scripts/robintrack/` hold each source's marimo notebooks. `01_*` explore and clean the raw data and write to `data/intermediate/`. `02_*` build on the clean data: the model panel from TAQ (`data/processed/`), and whether Robintrack holder changes predict returns. `scripts/taq/checks/` holds checks of the TAQ pull.
+- `scripts/models/` tunes the models with W&B sweeps (03), reruns the chosen settings in a monthly walk-forward (04) and backtests the predictions (05).
 - `src/dsr/` holds reusable code and `tests/` its tests (`uv run pytest`).
 - Local only, never commit: `data/`, `plan.md`, `literature/`.
 
@@ -17,7 +20,7 @@ Every input to a return prediction must have been known before the decision. Pos
 - Any setting chosen by looking at the data (holder floors, outlier and winsorizing cutoffs, exclusion windows, target units, model choices) is chosen on the training period only and applied unchanged to the test period. Never tune anything on test-period results.
 - Filters work row by row with what was known at the time: yesterday's holders, not a full-sample median.
 - Fixing how the data was recorded (PERMNO matching, share-class splits, placeholder zeros, repeated readings) is fine on the full sample, because it does not select by value.
-- Robintrack timestamps are retrieval times in UTC, and the counts lag them by about 25 to 40 minutes. A day's close count is the reading taken between 16:40 and 16:59 New York time.
+- Robintrack timestamps are retrieval times in UTC, and the counts lag them by about 25 to 40 minutes. A day's count is the first reading taken between 15:40 and 15:50 New York time, the last one before the cutoff; daily changes run from one trading day's count to the next.
 
 ## Survivorship bias
 

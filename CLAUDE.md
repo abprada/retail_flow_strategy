@@ -4,8 +4,11 @@ Research code for predicting next-day cross-sectional US stock returns: how stoc
 
 ## Layout
 
-- `scripts/00_data_*.py` download raw data into `data/raw/` unchanged (Robintrack holder counts; CRSP names and corporate events from WRDS). They never modify the data.
-- `scripts/01_clean_*.py` are marimo notebooks that explore and clean the raw data and write to `data/intermediate/`.
+Scripts are grouped by source; their number prefix gives the order they run in.
+
+- `scripts/data_acquisition/` downloads raw data into `data/raw/` unchanged: TAQ (the full pull runs on WRDS Cloud, `wrds_cloud/`), Robintrack holder counts, and CRSP names, daily data and corporate events from WRDS. Nothing there modifies the data.
+- `scripts/taq/` and `scripts/robintrack/` hold each source's marimo notebooks. `01_*` explore and clean the raw data and write to `data/intermediate/`. `02_*` build on the clean data: the model panel from TAQ (`data/processed/`), and whether Robintrack holder changes predict returns. `scripts/taq/checks/` holds checks of the TAQ pull.
+- `scripts/models/` tunes the models with W&B sweeps (03), reruns the chosen settings in a monthly walk-forward (04) and backtests the predictions (05).
 - `src/dsr/` holds reusable code and `tests/` its tests (`uv run pytest`).
 - Local only, never commit: `data/`, `plan.md`, `literature/`.
 

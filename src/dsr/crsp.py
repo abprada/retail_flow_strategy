@@ -1,8 +1,8 @@
 """CRSP definitions shared by both models: the daily file's columns, the return to predict, and each security's class.
 
-The Robintrack panels (scripts/01_clean_explore_robintrack.py) and the TAQ panels both use these, so "common stock",
+The Robintrack panels (scripts/robintrack/01_clean_explore_robintrack.py) and the TAQ panels both use these, so "common stock",
 the previous day's price and the next-day return mean the same in Model 1 and Model 2. Columns joined from the daily
-file are named by when they are known (explanations/robintrack_cleaning.md, section 6): `*_prev` for the previous
+file are named by when they are known (explanations/robintrack/robintrack_cleaning.md, section 6): `*_prev` for the previous
 trading day (known before the 15:50 cutoff), `*_t` for day t (known only after its close), and `ret_next` for the
 return from day t's close to the next trading day's close, the return to predict.
 """

@@ -6,15 +6,16 @@ of liquid equities, not market direction) from a single public data source, exam
 ## Layout
 
 ```
-src/dsr/
-  data.py        # ingestion + point-in-time alignment
-  universe.py    # liquid universe construction
-  features.py    # raw fields -> one number per stock per day
-  evaluation.py  # IC, quantile spreads, turnover, decay
-notebooks/       # exploration
-reports/         # write-up and figures
-data/            # local only (gitignored)
+scripts/
+  data_acquisition/  # raw data, downloaded unchanged: TAQ (wrds_cloud/), CRSP, Robintrack
+  taq/               # clean and explore (01), the model panel (02), checks/
+  robintrack/        # clean and explore (01), holder changes and returns (02)
+  models/            # tuning (03), monthly walk-forward (04), backtest (05)
+src/dsr/             # reusable code
 tests/
+notebooks/           # exploration
+reports/             # write-up and figures
+data/                # local only (gitignored)
 ```
 
 ## Setup
