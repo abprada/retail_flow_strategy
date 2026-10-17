@@ -220,6 +220,73 @@ def write_decision_days(pull_dir: Path, out_dir: Path, wct_days: list[str], test
     return pd.DataFrame(rows)
 
 
+ROUND_LOT_TIERS_FROM = "20251103"  # WCT day the price tiers of the round lot started (dsr.taq_sql.ROUND_LOT_TIERS_FROM)
+PRICE_SETS = ["rl", "rl100", "px"]
+PRICE_PARTS = ["open", "high", "low", "close", "trades"]
+
+
+def chart_prices(prices: pd.DataFrame, wct_day: str, small_lot: set) -> pd.DataFrame:
+    """Add the px_ prices: each bar's open, high, low, close and trade count under the round-lot rule before
+    2025-11-03, held fixed. Before that WCT day they are the rl_ prices (the tape's odd-lot flag followed that rule);
+    from it, the rl100_ prices (trades of 100 shares or more), except for the stocks whose round lot was already below
+    100 shares before the change (small_lot, PERMNOs), which keep rl_. prices has permno and the rl_ and rl100_ columns."""
+    old_rule = wct_day < ROUND_LOT_TIERS_FROM
+    use_rl = pd.Series(old_rule, index=prices.index) | prices["permno"].isin(small_lot)
+    return prices.assign(**{f"px_{part}": prices[f"rl_{part}"].where(use_rl, prices[f"rl100_{part}"])
+                            for part in PRICE_PARTS})
+
+
+def decision_day_prices(previous: pd.DataFrame | None, own: pd.DataFrame, previous_links: pd.DataFrame | None,
+                        own_links: pd.DataFrame, previous_day: str | None, own_day: str, stocks: set,
+                        small_lot: set) -> pd.DataFrame:
+    """A decision day's round-lot prices (the price-only pull, dsr.taq_sql.prices_sql): the previous WCT day's last
+    ten minutes (bucket 2, piece prev_last10) and its own session (bucket 1, piece session), for the primary symbols of
+    the decision day's stocks (`stocks`, its panel PERMNOs), with the PERMNO each symbol had on the day it traded, as
+    the bars have them. Adds the px_ prices (chart_prices). Columns: permno, piece, bar, then rl_, rl100_ and px_ open,
+    high, low, close and trades."""
+    parts = [chart_prices(_keep(own[own["bucket"] == 1], own_links, stocks), own_day, small_lot)]
+    if previous is not None:
+        parts.insert(0, chart_prices(_keep(previous[previous["bucket"] == 2], previous_links, stocks), previous_day,
+                                     small_lot))
+    table = pd.concat(parts, ignore_index=True)
+    table["piece"] = table["bucket"].map(PIECES)
+    table = table.assign(_order=table["bucket"].map(_ORDER)).sort_values(["permno", "_order", "bar"], ignore_index=True)
+    columns = ["permno", "piece", "bar", *[f"{s}_{p}" for s in PRICE_SETS for p in PRICE_PARTS]]
+    counts = {f"{s}_trades": "int64" for s in PRICE_SETS}
+    return table[columns].astype(counts)
+
+
+def write_decision_day_prices(prices_dir: Path, out_dir: Path, wct_days: list[str], test_start: str, links, stocks,
+                              small_lot: set, progress=iter) -> pd.DataFrame:
+    """Write every decision day's prices.parquet into out_dir/train/<YYYYMMDD>/ or out_dir/test/<YYYYMMDD>/, next to
+    the bars write_decision_days wrote there.
+
+    prices_dir holds the price-only pull, one folder per WCT day. links: a function from a WCT day to its symbol, permno
+    and primary. stocks: a function from a decision day to its panel PERMNOs. small_lot: the PERMNOs whose round lot was
+    below 100 shares before 2025-11-03 (chart_prices). Each file is written under a temporary name and renamed when
+    complete; days already written are skipped. Returns one row per decision day: its period and rows.
+    """
+    def read(day):
+        return pq.read_table(prices_dir / day / "prices.parquet").to_pandas()
+
+    rows, previous = [], None
+    for prev_day, day in progress(list(pairwise(wct_days))):
+        period = "train" if day < test_start else "test"
+        path = out_dir / period / day / "prices.parquet"
+        if path.exists():
+            previous = None
+        else:
+            own = read(day)
+            table = decision_day_prices(previous if previous is not None else read(prev_day), own, links(prev_day),
+                                        links(day), prev_day, day, stocks(day), small_lot)
+            part = path.with_name("prices.parquet.part")
+            table.to_parquet(part, index=False, compression="zstd")
+            part.rename(path)
+            previous = own
+        rows.append({"decision_day": day, "period": period, "prices_rows": pq.ParquetFile(path).metadata.num_rows})
+    return pd.DataFrame(rows)
+
+
 def stack_panels(out_dir: Path) -> None:
     """Gather each period's daily files into one panel, out_dir/panel_<period>.parquet (one row per day and stock),
     then remove them, leaving bars and cells in the day folders. Written to a .part file and renamed when complete."""

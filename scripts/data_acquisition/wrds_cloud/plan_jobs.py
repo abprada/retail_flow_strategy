@@ -1,9 +1,9 @@
 """Split the full TAQ pull into SGE jobs of equal size, and write their job scripts into the WRDS Cloud bundle.
 
-    uv run python scripts/wrds_cloud/plan_jobs.py [--jobs 5] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
-                                                  [--days-file days.txt --first-job 6]
+    uv run python scripts/data_acquisition/wrds_cloud/plan_jobs.py [--jobs 5] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+                                                  [--days-file days.txt --first-job 6] [--prices]
 
-WRDS Cloud allows a user 10 batch slots and 150 GB of memory at once (explanations/TAQ/wrds_cloud.md); a job takes 2
+WRDS Cloud allows a user 10 batch slots and 150 GB of memory at once (explanations/taq/wrds_cloud.md); a job takes 2
 slots, so 5 jobs of 30 GB (m_mem_free is per slot: 15 GB x 2) use both limits fully. Days are weighted by the size of
 their raw trades (the typical day of their year, from the coverage check and the pilot), so each job gets about the
 same amount of work, not the same number of days. Within every job the days run in order of priority, so the most
@@ -13,10 +13,14 @@ With --from and --to, only the days in that range; with --days-file, only the da
 for pulling some days again after a change to the query. With --first-job k > 1 the jobs are numbered from k, the
 existing job files are kept, and the submit script is submit_<k>_<last>.sh, so jobs still running are not touched.
 
-Writes, into scripts/wrds_cloud/jobs/ (and the bundle, when it is rebuilt):
+Writes, into scripts/data_acquisition/wrds_cloud/jobs/ (and the bundle, when it is rebuilt):
     days_<k>.txt     the days of job k, in the order it runs them
     job_<k>.sh       the SGE job script of job k
     submit_all.sh    submits every job (run from ~/taq on WRDS Cloud: bash jobs/submit_all.sh)
+
+With --prices, the jobs of the price-only pull (taq_cloud_day.py --prices, output in /scratch/mit/$USER/taq_prices)
+instead, written next to the others without touching them: prices_days_<k>.txt, prices_<k>.sh and submit_prices.sh.
+Their days run in date order, the training days (to 2023) first, then the test days.
 """
 
 import argparse
@@ -45,6 +49,20 @@ cd ~/taq
 python3 taq_cloud_day.py --work /scratch/mit/$USER/taq_work --out /scratch/mit/$USER/taq_out --days-file jobs/days_{k}.txt
 """
 
+PRICES_JOB = """#!/bin/bash
+# TAQ price-only pull, job {k} of {n}: {days} days ({first} first). Written by plan_jobs.py --prices.
+#$ -N taq_p{k}
+#$ -cwd
+#$ -j y
+#$ -l m_mem_free={mem}G
+#$ -o /scratch/mit/$USER/taq_logs/$JOB_NAME.$JOB_ID.log
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+cd ~/taq
+python3 taq_cloud_day.py --prices --work /scratch/mit/$USER/taq_work_prices --out /scratch/mit/$USER/taq_prices \\
+    --days-file jobs/prices_days_{k}.txt
+"""
+PRICES_SECONDS_PER_GB = 12  # of the full pull's raw trades: the price-only pull copies about half and computes little
+
 SUBMIT = """#!/bin/bash
 # Submit jobs {ks} of the TAQ pull. Run from ~/taq on WRDS Cloud (qsub fails on absolute paths there).
 mkdir -p /scratch/mit/$USER/taq_logs
@@ -68,6 +86,7 @@ def main() -> None:
     parser.add_argument("--to", dest="end", default="9999-99-99")
     parser.add_argument("--days-file", type=Path)
     parser.add_argument("--first-job", type=int, default=1)
+    parser.add_argument("--prices", action="store_true", help="jobs of the price-only pull")
     args = parser.parse_args()
     n, first = args.jobs, args.first_job
 
@@ -78,7 +97,7 @@ def main() -> None:
         if listed - set(days):
             raise SystemExit(f"not trading days in range: {sorted(listed - set(days))[:5]}")
         days = [d for d in days if d in listed]
-    order = sorted(days, key=lambda d: (priority(d), d))
+    order = sorted(days, key=lambda d: (d > "2023-12-31", d) if args.prices else (priority(d), d))
     jobs: list[list[str]] = [[] for _ in range(n)]
     load = [0.0] * n
     for day in order:  # each day to the job with the least work so far
@@ -87,9 +106,23 @@ def main() -> None:
         load[k] += GB_PER_DAY[day[:4]]
 
     OUT.mkdir(exist_ok=True)
+    if args.prices:
+        for old in OUT.glob("prices*"):
+            old.unlink()
+        for k, (job, gb) in enumerate(zip(jobs, load), start=1):
+            (OUT / f"prices_days_{k}.txt").write_text("\n".join(job) + "\n")
+            (OUT / f"prices_{k}.sh").write_text(PRICES_JOB.format(k=k, n=n, days=len(job), first=job[0],
+                                                                  mem=MEMORY_PER_SLOT_GB))
+            print(f"job {k}: {len(job):,} days, ~{gb * PRICES_SECONDS_PER_GB / 3600:.1f} hours")
+        (OUT / "submit_prices.sh").write_text(SUBMIT.format(ks=" ".join(str(k) for k in range(1, n + 1)))
+                                              .replace("jobs/job_$k.sh", "jobs/prices_$k.sh")
+                                              .replace("Submit jobs", "Submit the price-only jobs"))
+        print(f"all: {len(days):,} days; with {n} jobs at once about {max(load) * PRICES_SECONDS_PER_GB / 3600:.1f} hours")
+        return
     if first == 1:
         for old in OUT.glob("*"):
-            old.unlink()
+            if not old.name.startswith("prices"):
+                old.unlink()
     for k, (job, gb) in enumerate(zip(jobs, load), start=first):
         (OUT / f"days_{k}.txt").write_text("\n".join(job) + "\n")
         (OUT / f"job_{k}.sh").write_text(JOB.format(k=k, n=n, days=len(job), gb=gb, first=job[0], mem=MEMORY_PER_SLOT_GB))

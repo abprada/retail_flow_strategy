@@ -1,9 +1,9 @@
 """Compute the TAQ pull's four tables for 2019-06-04 in Python: the reference the WRDS query must match.
 
-    uv run python scripts/checks/TAQ_reference_day.py
+    uv run python scripts/taq/checks/TAQ_reference_day.py
 
-Runs the one-day cleaning notebook (scripts/01_clean_and_explore_TAQ_raw_trades.py) headless, about 5 minutes, then builds
-`daily`, `cells`, `bars` and `audit` from its trades exactly as explanations/taq_pull.md (sections 4 to 6) defines them,
+Runs the one-day cleaning notebook (scripts/taq/01_clean_and_explore_TAQ_raw_trades.py) headless, about 5 minutes, then builds
+`daily`, `cells`, `bars` and `audit` from its trades exactly as explanations/taq/taq_pull.md (sections 4 to 6) defines them,
 and runs the conservation checks of section 7 on them. All bin arithmetic is in whole numbers: prices in millionths of a
 dollar, so trades exactly on a bin edge (Z = 0.4 or 0.6) land where the spec says.
 
@@ -12,6 +12,7 @@ Outputs (gitignored), in data/raw/taq/checks/reference/20190604/:
     checks.csv                                                  the conservation checks
 """
 
+import gc
 import importlib.util
 import time
 from pathlib import Path
@@ -21,8 +22,8 @@ import pandas as pd
 
 from dsr.taq import check_day
 
-ROOT = Path(__file__).resolve().parents[2]
-NOTEBOOK = ROOT / "scripts" / "01_clean_and_explore_TAQ_raw_trades.py"
+ROOT = Path(__file__).resolve().parents[3]
+NOTEBOOK = ROOT / "scripts" / "taq" / "01_clean_and_explore_TAQ_raw_trades.py"
 BUCKET_CODES = {"overnight_morning": 0, "regular": 1, "last": 2, "overnight_evening": 3}
 TEN_MINUTES = 600 * 10**9
 LARGE = 100_000 * 10**6  # $100,000 in millionths of a dollar
@@ -61,6 +62,7 @@ def codes(t: pd.DataFrame, open_ns: int) -> dict[str, np.ndarray]:
         "bucket": bucket,
         "bar": np.where(bucket == 1, (t["t_ns"].to_numpy() - open_ns) // TEN_MINUTES, 0),
         "t": t["t_ns"].to_numpy(), "seq": t["tr_seqnum"].to_numpy().astype(np.int64),
+        "odd": t["tr_scond"].fillna("").str.contains("I", regex=False).to_numpy(),
     }
 
 
@@ -109,12 +111,24 @@ def build_bars(sym_code: np.ndarray, sym_names: np.ndarray, price: np.ndarray, c
     same = (bjzz_buy & mid_buy) | (bjzz_sell & mid_sell)
     ones = np.ones(len(inv), dtype=bool)
 
+    # the rl_ prices: trades other than odd lots (sale condition I), which cannot set the official last, high or low
+    lot, p_lot = ~c["odd"][order], price[order]
+    position = np.arange(len(order))
+    first_lot = np.minimum.reduceat(np.where(lot, position, len(order)), first)
+    last_lot = np.maximum.reduceat(np.where(lot, position, -1), first)
+    has_lot = last_lot >= 0
+
     bars = pd.DataFrame({
         "symbol": sym_names[uniq // 256], "bucket": ((uniq // 64) % 4).astype(np.int8), "bar": (uniq % 64).astype(np.int8),
         "open": price[order][first], "high": np.maximum.reduceat(price[order], first),
         "low": np.minimum.reduceat(price[order], first), "close": price[order][last],
         "last_mid": np.where(last_valid >= 0, mid[np.maximum(last_valid, 0)], np.nan),
         "last_trade_time": c["t"][order][last],
+        "rl_open": np.where(has_lot, p_lot[np.minimum(first_lot, len(order) - 1)], np.nan),
+        "rl_high": np.where(has_lot, np.maximum.reduceat(np.where(lot, p_lot, -np.inf), first), np.nan),
+        "rl_low": np.where(has_lot, np.minimum.reduceat(np.where(lot, p_lot, np.inf), first), np.nan),
+        "rl_close": np.where(has_lot, p_lot[np.maximum(last_lot, 0)], np.nan),
+        "rl_trades": sums(~c["odd"], 1).astype(np.int64),
         "trades": np.bincount(inv), "shares": sums(ones, c["size"]).astype(np.int64), "dollars": sums(ones, c["D"]) / 1e6,
     })
     for name, m in [("bjzz_buy", bjzz_buy), ("bjzz_sell", bjzz_sell), ("mid_buy", mid_buy), ("mid_sell", mid_sell)]:
@@ -187,18 +201,22 @@ def main() -> None:
     regular_bars = int((session["cutoff"] - session["open"]) // TEN_MINUTES)
     print(f"notebook ran: {len(defs['clean_trades']):,} clean trades ({time.time() - t0:.0f} s)", flush=True)
 
-    t = defs["clean_trades"]
+    after1 = defs["c3_all"]
+    kept_all = (after1["bucket"].ne("") & (after1["price"] >= defs["PRICE_MIN"]) & (after1["size"] > 0)).to_numpy()
+    audit = build_audit(defs, kept_all)
+    # the notebook's intermediate tables are no longer needed: free them before the per-trade arrays (memory)
+    t = defs["clean_trades"][["symbol", "price", "size", "nbb", "nbo", "ex", "bucket", "t_ns", "tr_seqnum", "tr_scond"]]
+    del defs, after1, kept_all, nb
+    gc.collect()
+
     c = codes(t, session["open"])
     sym_code, sym_names = pd.factorize(t["symbol"])
     sym_names = np.asarray(sym_names)
-    after1 = defs["c3_all"]
-    kept_all = (after1["bucket"].ne("") & (after1["price"] >= defs["PRICE_MIN"]) & (after1["size"] > 0)).to_numpy()
-
     tables = {
         "daily": build_daily(t["symbol"].to_numpy(), c),
         "cells": build_cells(sym_code, sym_names, c),
         "bars": build_bars(sym_code, sym_names, t["price"].to_numpy(dtype=float), c),
-        "audit": build_audit(defs, kept_all),
+        "audit": audit,
     }
     out = ROOT / "data" / "raw" / "taq" / "checks" / "reference" / day.replace("-", "")
     out.mkdir(parents=True, exist_ok=True)

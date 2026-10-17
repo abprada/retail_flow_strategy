@@ -1,4 +1,4 @@
-"""The TAQ pull's per-day SQL (explanations/taq_pull.md), generated for DuckDB (local development) or Postgres (WRDS).
+"""The TAQ pull's per-day SQL (explanations/taq/taq_pull.md), generated for DuckDB (local development) or Postgres (WRDS).
 
 One template, two dialects. The few differences are switches here: the source tables and their column types,
 integer division, regular expressions and time arithmetic. Integer division is only ever applied to positive numbers,
@@ -192,11 +192,15 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
     retail_cols = ",\n".join(
         f"{s(r, '1')} AS {r}_trades, {s(r, 'size')} AS {r}_shares, {usd(s(r, 'dm'))} AS {r}_dollars"
         for r in ["bjzz_buy", "bjzz_sell", "mid_buy", "mid_sell"])
+    # an odd lot (sale condition I) cannot set the official last price, high or low; the rl_ prices leave them out
     bars_f = f"""
             SELECT symbol, bucket, bar, t, seq, price, size, dm, venue, p, bid, ask, valid,{flags},
+                   cond LIKE '%I%' AS odd,
                    ROW_NUMBER() OVER ({part} ORDER BY t, seq) AS rn_first,
                    ROW_NUMBER() OVER ({part} ORDER BY t DESC, seq DESC) AS rn_last,
-                   ROW_NUMBER() OVER ({part}, valid ORDER BY t DESC, seq DESC) AS rn_last_valid
+                   ROW_NUMBER() OVER ({part}, valid ORDER BY t DESC, seq DESC) AS rn_last_valid,
+                   ROW_NUMBER() OVER ({part}, cond LIKE '%I%' ORDER BY t, seq) AS rn_first_lot,
+                   ROW_NUMBER() OVER ({part}, cond LIKE '%I%' ORDER BY t DESC, seq DESC) AS rn_last_lot
             FROM ({kept}) k"""
     bars = f"""
         SELECT symbol, bucket, bar,
@@ -204,6 +208,10 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
                MAX(CASE WHEN rn_last = 1 THEN price END) AS close,
                {d.float_('MAX(CASE WHEN valid AND rn_last_valid = 1 THEN (ask + bid) / 2000000.0 END)')} AS last_mid,
                MAX(CASE WHEN rn_last = 1 THEN t END) AS last_trade_time,
+               MAX(CASE WHEN NOT odd AND rn_first_lot = 1 THEN price END) AS rl_open,
+               MAX(CASE WHEN NOT odd THEN price END) AS rl_high, MIN(CASE WHEN NOT odd THEN price END) AS rl_low,
+               MAX(CASE WHEN NOT odd AND rn_last_lot = 1 THEN price END) AS rl_close,
+               {s('NOT odd', '1')} AS rl_trades,
                COUNT(*) AS trades, SUM(size) AS shares, {usd('SUM(dm)')} AS dollars,
                {retail_cols},
                {s('venue = 1', '1')} AS off_trades, {s('venue = 1', 'size')} AS off_shares,
@@ -260,13 +268,17 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
         order = "CAST(t AS HUGEINT) * 10000000000000000000 + seq"
         bars_f = f"""
             SELECT symbol, bucket, bar, t, seq, price, size, dm, venue, p, bid, ask, valid,{flags},
-                   {order} AS ord
+                   cond LIKE '%I%' AS odd, {order} AS ord
             FROM ({kept}) k"""
         bars = bars.replace("MAX(CASE WHEN rn_first = 1 THEN price END)", "ARG_MIN(price, ord)")
         bars = bars.replace("MAX(CASE WHEN rn_last = 1 THEN price END)", "ARG_MAX(price, ord)")
         bars = bars.replace("MAX(CASE WHEN valid AND rn_last_valid = 1 THEN (ask + bid) / 2000000.0 END)",
                             "ARG_MAX((ask + bid) / 2000000.0, ord) FILTER (WHERE valid)")
         bars = bars.replace("MAX(CASE WHEN rn_last = 1 THEN t END)", "MAX(t)")
+        bars = bars.replace("MAX(CASE WHEN NOT odd AND rn_first_lot = 1 THEN price END)",
+                            "ARG_MIN(price, ord) FILTER (WHERE NOT odd)")
+        bars = bars.replace("MAX(CASE WHEN NOT odd AND rn_last_lot = 1 THEN price END)",
+                            "ARG_MAX(price, ord) FILTER (WHERE NOT odd)")
         assert "rn_" not in bars
 
     if temp_tables:
@@ -275,6 +287,57 @@ def day_sql(d: Dialect, day: Day, temp_tables: bool = True) -> dict[str, list[st
     prefix = f"WITH ctm_f AS ({ctm}), pairs AS ({pairs}), s1 AS ({s1})"
     return {"setup": [], "daily": f"{prefix} {daily}", "cells": f"{prefix} {cells}",
             "bars": f"{prefix}, f AS ({bars_f}) {bars}", "audit": f"{prefix} {audit}"}
+
+
+# From 2025-11-03 the official round lot depends on the stock's price (Reg NMS Rule 600(b), amended 2024): 100 shares up
+# to $250, 40 to $1,000, 10 to $10,000, 1 above; before, 100 shares for nearly every stock (10 or 1 for a few very
+# high-priced ones). The tape's odd-lot flag (sale condition I) follows the rule in force, so the rl_ prices change
+# definition on that day for stocks above $250. The rl100_ prices hold the old rule fixed: not flagged and at least
+# 100 shares, in every year.
+ROUND_LOT_TIERS_FROM = "2025-11-03"
+PRICE_COLUMNS = ["symbol", "bucket", "bar",
+                 "rl_open", "rl_high", "rl_low", "rl_close", "rl_trades",
+                 "rl100_open", "rl100_high", "rl100_low", "rl100_close", "rl100_trades"]
+
+
+def prices_pull_filter(close: str) -> str:
+    """The rows of `wct` the price-only pull copies: trades from the open to the close (buckets 1 and 2) that are not
+    flagged as odd lots. The cleaning is applied to them afterwards as in day_sql."""
+    return f"time_m >= '09:30:00' AND time_m < '{close}:00' AND (tr_scond IS NULL OR tr_scond NOT LIKE '%I%')"
+
+
+def prices_sql(d: Dialect, day: Day) -> dict[str, list[str] | str]:
+    """The price-only pull (DuckDB): one row per symbol and bar of buckets 1 and 2 with a trade not flagged as an odd
+    lot, with two sets of round-lot prices (see ROUND_LOT_TIERS_FROM):
+
+        rl_open, rl_high, rl_low, rl_close, rl_trades           trades not flagged as odd lots (the rule of the day)
+        rl100_open, rl100_high, rl100_low, rl100_close, rl100_trades   of those, trades of 100 shares or more
+
+    rl100_ prices are null when the bar has no such trade. Run on the rows prices_pull_filter selects (the quote
+    columns may be empty: prices do not use them), with the cleaning of day_sql, so the rl_ prices equal the rl_
+    columns of a full pull's bars. One exception: a trade corrected into an odd lot after the cutoff, whose original
+    is restored as a round lot in the full pull, is missing here (the pull filters on the corrected row).
+    """
+    if d.name != "duckdb":
+        raise ValueError("the price-only pull is computed with DuckDB")
+    full = day_sql(d, day, temp_tables=True)
+    order = "CAST(t AS HUGEINT) * 10000000000000000000 + seq"  # time, then sequence number, as in the bars
+
+    def prices(prefix: str, where: str) -> str:
+        return (f"ARG_MIN(price, ord) FILTER (WHERE {where}) AS {prefix}_open, "
+                f"MAX(price) FILTER (WHERE {where}) AS {prefix}_high, MIN(price) FILTER (WHERE {where}) AS {prefix}_low, "
+                f"ARG_MAX(price, ord) FILTER (WHERE {where}) AS {prefix}_close, "
+                f"COUNT(*) FILTER (WHERE {where}) AS {prefix}_trades")
+
+    query = f"""
+        WITH k AS (
+            SELECT symbol, bucket, bar, price, size, cond LIKE '%I%' AS odd, {order} AS ord
+            FROM s1 WHERE fate = 'kept' AND bucket IN (1, 2)
+        )
+        SELECT symbol, bucket, bar, {prices('rl', 'NOT odd')}, {prices('rl100', 'NOT odd AND size >= 100')}
+        FROM k GROUP BY symbol, bucket, bar
+        HAVING COUNT(*) FILTER (WHERE NOT odd) > 0"""
+    return {"setup": full["setup"], "prices": query}
 
 
 def day_parameters(date: str, has_nano: bool, cutoff_offset_minutes: int = 10) -> Day:

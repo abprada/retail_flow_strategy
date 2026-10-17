@@ -1,4 +1,4 @@
-"""The TAQ pull's tables: bin codes and the conservation checks run on every pulled day (explanations/taq_pull.md).
+"""The TAQ pull's tables: bin codes and the conservation checks run on every pulled day (explanations/taq/taq_pull.md).
 
 A day's four tables: `daily` (symbol, spread_bp), `cells` (symbol, bucket, venue, z, q, spread, size; trades, shares,
 dollars), `bars` (symbol, bucket, bar; prices, counts and sums) and `audit` (section, item, venue, kept; trades, shares,
@@ -19,6 +19,8 @@ RETAIL_CELLS = {
 }
 VALUES = ["trades", "shares", "dollars"]
 DOLLAR_TOLERANCE = 0.01
+RL_PRICES = ["rl_open", "rl_high", "rl_low", "rl_close"]  # the bar's prices from trades other than odd lots
+ROUND_SIZE_CODES = [2, 3]  # 100 to 499 and 500 or more shares, under $100,000: never odd lots
 
 
 def _equal(a: pd.DataFrame, b: pd.DataFrame, what: str) -> tuple[str, bool, str]:
@@ -64,6 +66,22 @@ def check_day(daily: pd.DataFrame, cells: pd.DataFrame, bars: pd.DataFrame, audi
     ok = bars.loc[reg, "bar"].between(0, regular_bars - 1).all() and (bars.loc[~reg, "bar"] == 0).all()
     results.append((f"regular bars are numbered 0 to {regular_bars - 1}, other buckets 0", bool(ok), ""))
 
+    if "rl_trades" in bars:  # days pulled before the round-lot columns have none
+        has = bars["rl_trades"] > 0
+        prices = bars[RL_PRICES]
+        bad = (bars["rl_trades"] > bars["trades"]) | prices.notna().any(axis=1).ne(has) | prices.isna().any(axis=1).eq(has)
+        results.append(("bars' round-lot prices are there exactly when rl_trades > 0, and rl_trades <= trades",
+                        not bad.any(), f"{int(bad.sum())} bars" if bad.any() else ""))
+        p = bars[has]
+        inside = ((p["low"] <= p["rl_low"]) & (p["rl_low"] <= p["rl_open"]) & (p["rl_low"] <= p["rl_close"])
+                  & (p["rl_open"] <= p["rl_high"]) & (p["rl_close"] <= p["rl_high"]) & (p["rl_high"] <= p["high"]))
+        results.append(("bars' round-lot prices lie within the bar's low and high, and their open and close within "
+                        "their own", bool(inside.all()), f"{int((~inside).sum())} bars" if not inside.all() else ""))
+        large = cells[cells["size"].isin(ROUND_SIZE_CODES)].groupby(key)["trades"].sum()
+        short = bars.groupby(key)["rl_trades"].sum().reindex(large.index, fill_value=0) < large
+        results.append(("bars' rl_trades count at least every trade of 100 shares or more under $100,000",
+                        not short.any(), f"{int(short.sum())} symbol-buckets" if short.any() else ""))
+
     steps = audit[audit["section"] == "step"].groupby(["item", "venue"])["trades"].sum().unstack(fill_value=0)
     removed = steps.reindex(["records", "cancelled_or_erroneous", "sale_condition", "price_or_size"], fill_value=0).sum()
     ok = (steps.loc["raw"] - removed == steps.loc["kept"]).all()
@@ -75,9 +93,60 @@ def check_day(daily: pd.DataFrame, cells: pd.DataFrame, bars: pd.DataFrame, audi
     return pd.DataFrame(results, columns=["check", "passed", "detail"])
 
 
+def check_prices(prices: pd.DataFrame, regular_bars: int) -> pd.DataFrame:
+    """The checks of one day of the price-only pull (taq_sql.prices_sql): one row per check: check, passed, detail."""
+    results = []
+    dup = int(prices.duplicated(["symbol", "bucket", "bar"]).sum())
+    results.append(("prices: keys are unique", dup == 0, f"{dup} duplicated keys" if dup else ""))
+    reg = prices["bucket"] == 1
+    ok = (prices["bucket"].isin([1, 2]).all() and prices.loc[reg, "bar"].between(0, regular_bars - 1).all()
+          and (prices.loc[~reg, "bar"] == 0).all())
+    results.append((f"prices: buckets 1 and 2 only, regular bars numbered 0 to {regular_bars - 1}", bool(ok), ""))
+    bad = (prices["rl_trades"] <= 0) | prices[RL_PRICES].isna().any(axis=1)
+    results.append(("prices: every row has a round lot and all four prices", not bad.any(),
+                    f"{int(bad.sum())} rows" if bad.any() else ""))
+    p = prices[~bad]
+    inside = ((p["rl_low"] <= p["rl_open"]) & (p["rl_low"] <= p["rl_close"]) & (p["rl_open"] <= p["rl_high"])
+              & (p["rl_close"] <= p["rl_high"]))
+    results.append(("prices: open and close lie within low and high", bool(inside.all()),
+                    f"{int((~inside).sum())} rows" if not inside.all() else ""))
+    if "rl100_trades" in prices:  # trades of 100 shares or more among them: the round-lot rule before 2025-11-03
+        r100 = [c.replace("rl_", "rl100_") for c in RL_PRICES]
+        has = prices["rl100_trades"] > 0
+        bad100 = ((prices["rl100_trades"] > prices["rl_trades"]) | prices[r100].notna().any(axis=1).ne(has)
+                  | prices[r100].isna().any(axis=1).eq(has))
+        results.append(("prices: rl100_ prices are there exactly when rl100_trades > 0, and rl100_trades <= rl_trades",
+                        not bad100.any(), f"{int(bad100.sum())} rows" if bad100.any() else ""))
+        q = prices[has & ~bad100]
+        inside = ((q["rl_low"] <= q["rl100_low"]) & (q["rl100_low"] <= q["rl100_open"])
+                  & (q["rl100_low"] <= q["rl100_close"]) & (q["rl100_open"] <= q["rl100_high"])
+                  & (q["rl100_close"] <= q["rl100_high"]) & (q["rl100_high"] <= q["rl_high"]))
+        results.append(("prices: rl100_ prices lie within the rl_ low and high, open and close within their own",
+                        bool(inside.all()), f"{int((~inside).sum())} rows" if not inside.all() else ""))
+    return pd.DataFrame(results, columns=["check", "passed", "detail"])
+
+
+def compare_prices_with_bars(prices: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    """A price-only day against the same day's full-pull bars: each price row's bar exists, its round-lot high and low
+    lie within the bar's high and low, and its round lots are at most the bar's trades. One row per check."""
+    keys = ["symbol", "bucket", "bar"]
+    m = prices.merge(bars[[*keys, "high", "low", "trades"]], on=keys, how="left")
+    missing = m["trades"].isna()
+    m = m[~missing]
+    outside = (m["rl_high"].astype(float) > m["high"].astype(float) + 1e-9) | (
+        m["rl_low"].astype(float) < m["low"].astype(float) - 1e-9)
+    more = m["rl_trades"] > m["trades"]
+    return pd.DataFrame([
+        ("every price row has a bar in the full pull", not missing.any(), f"{int(missing.sum())} rows" if missing.any() else ""),
+        ("round-lot high and low within the bar's high and low", not outside.any(),
+         f"{int(outside.sum())} rows" if outside.any() else ""),
+        ("round lots at most the bar's trades", not more.any(), f"{int(more.sum())} rows" if more.any() else ""),
+    ], columns=["check", "passed", "detail"])
+
+
 KEYS = {"daily": ["symbol"], "cells": ["symbol", "bucket", "venue", "z", "q", "spread", "size"],
         "bars": ["symbol", "bucket", "bar"], "audit": ["section", "item", "venue", "kept"]}
-FLOAT_COLUMNS = {"spread_bp", "open", "high", "low", "close", "last_mid"}  # compared within FLOAT_TOLERANCE
+FLOAT_COLUMNS = {"spread_bp", "open", "high", "low", "close", "last_mid", *RL_PRICES}  # within FLOAT_TOLERANCE
 FLOAT_TOLERANCE = 1e-6
 
 

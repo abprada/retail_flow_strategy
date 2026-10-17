@@ -1,4 +1,4 @@
-"""Run the TAQ pull on WRDS Cloud for a list of days (explanations/taq_pull.md, explanations/TAQ/wrds_cloud.md).
+"""Run the TAQ pull on WRDS Cloud for a list of days (explanations/taq/taq_pull.md, explanations/taq/wrds_cloud.md).
 
 On WRDS Cloud, in a folder holding this script, days.csv and the package folder dsr/ (taq.py, taq_sql.py):
 
@@ -41,7 +41,7 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1] / "src"))  # when run from the repository
+sys.path.insert(0, str(HERE.parents[2] / "src"))  # when run from the repository
 
 NS = 10**9
 WCT_COLUMNS = ["sym_root", "sym_suffix", "time_m", "time_m_nano", "ex", "tr_scond", "price", "size", "tr_seqnum",
@@ -51,6 +51,8 @@ CTM_COLUMNS = ["sym_root", "sym_suffix", "time_m", "time_m_nano", "ex", "tr_scon
 MANIFEST_FIELDS = ["day", "version", "job", "close", "has_nano", "has_tr_id", "wct_rows_mb", "ctm_rows_mb",
                    "pull_seconds", "compute_seconds", "daily_rows", "cells_rows", "bars_rows", "audit_rows", "out_mb",
                    "checks_passed"]
+PRICE_MANIFEST_FIELDS = [f for f in MANIFEST_FIELDS if not f.endswith("_rows") or f.startswith(("wct", "ctm"))]
+PRICE_MANIFEST_FIELDS.insert(PRICE_MANIFEST_FIELDS.index("out_mb"), "prices_rows")
 LOCAL_RAW_GB, LOCAL_SPILL_GB = 60, 30  # free space needed on the node's local disk to use it
 
 # Bumped by hand when this script changes what a day's output contains (the columns pulled, the parameters); the
@@ -58,13 +60,14 @@ LOCAL_RAW_GB, LOCAL_SPILL_GB = 60, 30  # free space needed on the node's local d
 OUTPUT_VERSION = "1"
 
 
-def code_version() -> str:
-    """A hash of what defines a day's output: the query template, the checks and OUTPUT_VERSION."""
-    h = hashlib.sha1(OUTPUT_VERSION.encode())
+def code_version(prices: bool = False) -> str:
+    """A hash of what defines a day's output: the query template, the checks, OUTPUT_VERSION and whether the pull is
+    the price-only one (--prices)."""
+    h = hashlib.sha1((OUTPUT_VERSION + (" prices" if prices else "")).encode())
     for name in ("taq_sql.py", "taq.py"):
         path = HERE / "dsr" / name
         if not path.exists():  # run from the repository
-            path = HERE.parents[1] / "src" / "dsr" / name
+            path = HERE.parents[2] / "src" / "dsr" / name
         h.update(path.read_bytes())
     return h.hexdigest()[:12]
 
@@ -155,8 +158,11 @@ def finished_days(out: Path, version: str) -> set[str]:
     return done
 
 
-def pull(args, date: str) -> None:
-    """Stage 1: the day's raw rows as CSV in <raw>/<YYYYMMDD>/, with meta.json."""
+def pull(args, date: str, close: str) -> None:
+    """Stage 1: the day's raw rows as CSV in <raw>/<YYYYMMDD>/, with meta.json. With --prices, only the rows the
+    price-only pull uses (taq_sql.prices_pull_filter), and the quote columns empty."""
+    from dsr.taq_sql import prices_pull_filter
+
     ymd = date.replace("-", "")
     final, part = args.raw / ymd, args.raw / f"{ymd}.pulling"
     shutil.rmtree(final, ignore_errors=True)
@@ -169,7 +175,13 @@ def pull(args, date: str) -> None:
             raise RuntimeError(f"taqmsec.wct_{ymd} or ctm_{ymd} not found")
         conn.rollback()
         start = time.perf_counter()
-        copy(f"SELECT {', '.join(c for c in WCT_COLUMNS if c in wct_cols)} FROM taqmsec.wct_{ymd}", part / "wct.csv")
+        if args.prices:
+            select = [f"NULL AS {c}" if c in ("nbb", "nbo") else c for c in WCT_COLUMNS
+                      if c in wct_cols or c in ("nbb", "nbo")]
+            wct_sql = f"SELECT {', '.join(select)} FROM taqmsec.wct_{ymd} WHERE {prices_pull_filter(close)}"
+        else:
+            wct_sql = f"SELECT {', '.join(c for c in WCT_COLUMNS if c in wct_cols)} FROM taqmsec.wct_{ymd}"
+        copy(wct_sql, part / "wct.csv")
         copy(f"SELECT {', '.join(c for c in CTM_COLUMNS if c in ctm_cols)} FROM taqmsec.ctm_{ymd} WHERE tr_corr <> '00'",
              part / "ctm.csv")
         seconds = time.perf_counter() - start
@@ -184,12 +196,13 @@ def pull(args, date: str) -> None:
 
 
 def compute(args, date: str, close: str, version: str) -> bool:
-    """Stage 2: the four tables from the day's raw rows; returns whether the checks pass."""
+    """Stage 2: the four tables from the day's raw rows (with --prices, the one table `prices`); returns whether the
+    checks pass."""
     import duckdb
     import pandas as pd
 
-    from dsr.taq import KEYS, check_day
-    from dsr.taq_sql import Day, Dialect, day_sql
+    from dsr.taq import KEYS, check_day, check_prices
+    from dsr.taq_sql import Day, Dialect, day_sql, prices_sql
 
     ymd = date.replace("-", "")
     raw = args.raw / ymd
@@ -198,7 +211,9 @@ def compute(args, date: str, close: str, version: str) -> bool:
     close_ns = (hours * 3600 + minutes * 60) * NS
     day = Day(ymd=ymd, open_ns=(9 * 3600 + 30 * 60) * NS, cutoff_ns=close_ns - 600 * NS, close_ns=close_ns,
               has_nano=meta["has_nano"])
-    sql = day_sql(Dialect("duckdb", local_dir=str(raw), local_format="csv"), day, temp_tables=True)
+    dialect = Dialect("duckdb", local_dir=str(raw), local_format="csv")
+    sql = prices_sql(dialect, day) if args.prices else day_sql(dialect, day, temp_tables=True)
+    names = ["prices"] if args.prices else list(KEYS)
 
     part = args.out / f"{ymd}.part"
     shutil.rmtree(part, ignore_errors=True)
@@ -212,7 +227,7 @@ def compute(args, date: str, close: str, version: str) -> bool:
     con.execute("SET preserve_insertion_order = false")  # lets DuckDB write large results without holding them
     for statement in sql["setup"]:
         con.execute(statement)
-    for name in KEYS:
+    for name in names:
         step = time.perf_counter()
         con.execute(f"COPY ({sql[name]}) TO '{part / name}.parquet' (FORMAT parquet, COMPRESSION zstd)")
         print(f"{date}:   {name} in {time.perf_counter() - step:.0f} s", flush=True)
@@ -220,9 +235,12 @@ def compute(args, date: str, close: str, version: str) -> bool:
     shutil.rmtree(spill, ignore_errors=True)
     compute_seconds = time.perf_counter() - start
 
-    tables = {name: pd.read_parquet(part / f"{name}.parquet") for name in KEYS}
-    checks = check_day(tables["daily"], tables["cells"], tables["bars"], tables["audit"],
-                       (day.cutoff_ns - day.open_ns) // (600 * NS))
+    tables = {name: pd.read_parquet(part / f"{name}.parquet") for name in names}
+    regular_bars = (day.cutoff_ns - day.open_ns) // (600 * NS)
+    if args.prices:
+        checks = check_prices(tables["prices"], regular_bars)
+    else:
+        checks = check_day(tables["daily"], tables["cells"], tables["bars"], tables["audit"], regular_bars)
     checks.to_csv(part / "checks.csv", index=False)
     final = args.out / ymd
     shutil.rmtree(final, ignore_errors=True)
@@ -231,12 +249,12 @@ def compute(args, date: str, close: str, version: str) -> bool:
     row = {"day": date, "version": version, "job": args.job, "close": close, "has_nano": day.has_nano,
            "has_tr_id": meta["has_tr_id"], "wct_rows_mb": meta["wct_rows_mb"], "ctm_rows_mb": meta["ctm_rows_mb"],
            "pull_seconds": meta["pull_seconds"], "compute_seconds": round(compute_seconds, 1),
-           **{f"{name}_rows": len(tables[name]) for name in KEYS},
+           **{f"{name}_rows": len(tables[name]) for name in names},
            "out_mb": round(sum(p.stat().st_size for p in final.glob("*.parquet")) / 1e6, 1), "checks_passed": passed}
     manifest = args.out / f"manifest_{args.job}.csv"
     new = not manifest.exists()
     with open(manifest, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=PRICE_MANIFEST_FIELDS if args.prices else MANIFEST_FIELDS)
         if new:
             writer.writeheader()
         writer.writerow(row)
@@ -258,6 +276,8 @@ def main() -> None:
     parser.add_argument("--memory", default="auto", help="DuckDB's memory cap, or auto: half the job's limit")
     parser.add_argument("--user", default=os.environ.get("WRDS_USERNAME") or os.environ.get("USER"))
     parser.add_argument("--dsn", help="a connection string instead of WRDS (for a local rehearsal)")
+    parser.add_argument("--prices", action="store_true",
+                        help="the price-only pull: round-lot prices of buckets 1 and 2 (taq_sql.prices_sql)")
     parser.add_argument("--stage", choices=["pull", "compute"], help=argparse.SUPPRESS)  # a child process
     parser.add_argument("--raw", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--spill", type=Path, help=argparse.SUPPRESS)
@@ -273,10 +293,10 @@ def main() -> None:
     unknown = [d for d in days if d not in closes]
     if unknown:
         raise SystemExit(f"not NYSE trading days in days.csv: {unknown}")
-    version = code_version()
+    version = code_version(args.prices)
 
     if args.stage == "pull":
-        pull(args, days[0])
+        pull(args, days[0], closes[days[0]])
         return
     if args.stage == "compute":
         sys.exit(0 if compute(args, days[0], closes[days[0]], version) else 1)
@@ -299,7 +319,8 @@ def main() -> None:
         return
     child = [sys.executable, str(Path(__file__).resolve()), "--work", str(args.work), "--out", str(args.out),
              "--threads", str(args.threads), "--memory", args.memory, "--user", args.user or "", "--raw", str(raw),
-             "--spill", str(spill), "--job", args.job] + (["--dsn", args.dsn] if args.dsn else [])
+             "--spill", str(spill), "--job", args.job] + (["--dsn", args.dsn] if args.dsn else []) + (
+                 ["--prices"] if args.prices else [])
 
     def start(stage: str, date: str) -> subprocess.Popen:
         return subprocess.Popen([*child, "--stage", stage, date])

@@ -1,6 +1,7 @@
 import pandas as pd
 
-from dsr.taq_split import CODES, decision_day_tables, stack_panels, stock_days, write_decision_days
+from dsr.taq_split import (CODES, chart_prices, decision_day_prices, decision_day_tables, stack_panels, stock_days,
+                            write_decision_day_prices, write_decision_days)
 
 D0, D1, D2 = "20231228", "20231229", "20240102"  # three trading days; the test period starts at D2
 
@@ -17,7 +18,7 @@ def _tables(buckets, symbol="A", close=10.0, dollars=100_000.0):
     Each bar trades `dollars`, and its last trade is at `close`."""
     bars = pd.DataFrame({"symbol": symbol, "bucket": buckets, "bar": 0, "trades": [10 * (b + 1) for b in buckets],
                          "shares": [100.0 * (b + 1) for b in buckets], "bjzz_buy_trades": 1.0,
-                         "close": close, "dollars": dollars})
+                         "close": close, "rl_close": close, "rl_trades": 1.0, "dollars": dollars})
     cells = bars[["symbol", "bucket", "trades", "shares"]].assign(venue=0, z=0, q=0, spread=0, size=0)
     return {"daily": pd.DataFrame({"symbol": [symbol], "spread_bp": [5.0]}), "cells": cells, "bars": bars}
 
@@ -47,6 +48,12 @@ def test_rows_lose_the_columns_the_filter_makes_redundant_and_counts_are_integer
     assert not {"symbol", "primary", "traded_day", "bucket"} & set(bars.columns)
     assert bars["permno"].tolist() == [1, 1, 1, 1]
     assert str(bars["shares"].dtype) == "int64" and str(bars["bjzz_buy_trades"].dtype) == "int64"
+
+
+def test_round_lot_columns_are_carried_and_their_count_is_an_integer():
+    bars = _day()["bars"]
+    assert bars["rl_close"].tolist() == [10.0] * 4
+    assert str(bars["rl_trades"].dtype) == "int64"
 
 
 def test_only_the_universes_primary_symbols_are_kept():
@@ -224,3 +231,39 @@ def test_stack_panels_skips_a_period_not_written(tmp_path):
     _day()["daily"].to_parquet(day / "daily.parquet")
     stack_panels(tmp_path)
     assert (tmp_path / "panel_train.parquet").exists() and not (tmp_path / "panel_test.parquet").exists()
+
+
+def _prices(symbol="A", rl=10.0, rl100=10.5):
+    """The price-only pull of one WCT day: a session bar (bucket 1) and the last ten minutes (bucket 2)."""
+    row = {f"rl_{p}": rl for p in ["open", "high", "low", "close"]} | {f"rl100_{p}": rl100 for p in ["open", "high", "low", "close"]}
+    return pd.DataFrame([{"symbol": symbol, "bucket": b, "bar": 0, **row, "rl_trades": 4, "rl100_trades": 2} for b in [1, 2]])
+
+
+def test_a_days_prices_hold_the_previous_last_ten_minutes_then_the_session_with_the_permno():
+    out = decision_day_prices(_prices(rl=9.0), _prices(), _links(), _links(), D0, D1, {1}, set())
+    assert out["piece"].tolist() == ["prev_last10", "session"] and out["permno"].tolist() == [1, 1]
+    assert out["rl_close"].tolist() == [9.0, 10.0] and out["px_close"].tolist() == [9.0, 10.0]  # the old rule: rl_
+    assert str(out["px_trades"].dtype) == "int64" and "symbol" not in out
+    assert decision_day_prices(_prices(), _prices(), _links(), _links(), D0, D1, {2}, set()).empty  # not in the panel
+
+
+def test_from_2025_11_03_chart_prices_keep_the_100_share_round_lot_except_for_stocks_already_below_it():
+    prices = _prices().assign(permno=[1, 2])
+    before = chart_prices(prices, "20251031", small_lot={2})
+    after = chart_prices(prices, "20251103", small_lot={2})
+    assert before["px_close"].tolist() == [10.0, 10.0]
+    assert after["px_close"].tolist() == [10.5, 10.0] and after["px_trades"].tolist() == [2, 4]
+
+
+def test_price_writer_puts_each_day_next_to_its_bars_and_resumes(tmp_path):
+    prices_dir, out = tmp_path / "prices", tmp_path / "out"
+    for day in [D0, D1, D2]:
+        (prices_dir / day).mkdir(parents=True)
+        _prices().to_parquet(prices_dir / day / "prices.parquet")
+    for period, day in [("train", D1), ("test", D2)]:
+        (out / period / day).mkdir(parents=True)
+    first = write_decision_day_prices(prices_dir, out, [D0, D1, D2], D2, lambda day: _links(), lambda day: {1}, set())
+    assert first[["decision_day", "period", "prices_rows"]].values.tolist() == [[D1, "train", 2], [D2, "test", 2]]
+    assert (out / "test" / D2 / "prices.parquet").exists() and not list(out.glob("*/*/*.part"))
+    again = write_decision_day_prices(prices_dir, out, [D0, D1, D2], D2, lambda day: _links(), lambda day: {1}, set())
+    assert again.equals(first)  # resumes: days written are skipped

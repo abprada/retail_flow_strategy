@@ -1,6 +1,12 @@
 """Download the TAQ pull's finished days from WRDS Cloud to this computer, check them, and free their space on WRDS.
 
-    uv run python scripts/wrds_cloud/download.py [--days-file days.txt] [--streams 4] [--every 10] [--delete-remote] [--once]
+    uv run python scripts/data_acquisition/wrds_cloud/download.py [--days-file days.txt] [--streams 4] [--every 10] [--delete-remote] [--once]
+                                                                 [--prices]
+
+With --prices, the price-only pull (taq_cloud_day.py --prices) instead: one table, prices.parquet, from
+/scratch/mit/abprada/taq_prices into data/raw/taq/prices/<YYYYMMDD>/; each day is also compared with the full pull's
+bars of that day in data/raw/taq/pull/ (every price row has its bar, its high and low lie within the bar's, its round
+lots are at most the bar's trades); a difference is printed and recorded in downloaded.csv, not retried.
 
 Needs one SSH connection that later commands share, so that WRDS asks for the password and Duo only once. Add to
 ~/.ssh/config on this computer:
@@ -42,17 +48,19 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dsr.taq import KEYS, check_day
+from dsr.taq import KEYS, check_day, check_prices, compare_prices_with_bars
 
 _spec = importlib.util.spec_from_file_location("taq_cloud_day", Path(__file__).resolve().parent / "taq_cloud_day.py")
 _job = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_job)
-VERSION = _job.code_version()  # only days made by the current code are downloaded
+VERSION = _job.code_version()  # only days made by the current code are downloaded (main sets it for --prices)
 
-LOCAL = ROOT / "data" / "raw" / "taq" / "pull"
+PULL = ROOT / "data" / "raw" / "taq" / "pull"
+LOCAL = PULL  # main sets it to data/raw/taq/prices for --prices
+TABLES = list(KEYS)
 DAYS = Path(__file__).resolve().parent / "days.csv"
 
 
@@ -85,30 +93,49 @@ def check(ymd: str, close: str, expected: dict | None) -> str | None:
     """None if the downloaded day is complete and consistent, else what is wrong."""
     folder = LOCAL / ymd
     try:
-        tables = {name: pd.read_parquet(folder / f"{name}.parquet") for name in KEYS}
+        tables = {name: pd.read_parquet(folder / f"{name}.parquet") for name in TABLES}
     except (OSError, ValueError) as e:
         return f"cannot read: {e}"
     hours, minutes = map(int, close.split(":"))
     regular_bars = ((hours * 60 + minutes - 10) - (9 * 60 + 30)) // 10
-    checks = check_day(tables["daily"], tables["cells"], tables["bars"], tables["audit"], regular_bars)
+    if "prices" in tables:
+        checks = check_prices(tables["prices"], regular_bars)
+    else:
+        checks = check_day(tables["daily"], tables["cells"], tables["bars"], tables["audit"], regular_bars)
     if not checks["passed"].all():
         return "conservation checks fail: " + "; ".join(checks.loc[~checks["passed"], "check"])
     if expected is None:
         return "not in any manifest"
-    wrong = [name for name in KEYS if len(tables[name]) != int(expected[f"{name}_rows"])]
+    wrong = [name for name in TABLES if len(tables[name]) != int(expected[f"{name}_rows"])]
     return f"row counts differ from the manifest: {wrong}" if wrong else None
 
 
+def against_bars(ymd: str) -> str:
+    """A price-only day against the full pull's bars of that day: '' if consistent, else what differs."""
+    bars_file = PULL / ymd / "bars.parquet"
+    if not bars_file.exists():
+        return "no full-pull bars"
+    prices = pd.read_parquet(LOCAL / ymd / "prices.parquet")
+    bars = pd.read_parquet(bars_file, columns=["symbol", "bucket", "bar", "high", "low", "trades"])
+    result = compare_prices_with_bars(prices, bars)
+    return "; ".join(f"{r.check}: {r.detail}" for r in result.itertuples() if not r.passed)
+
+
 def main() -> None:
+    global VERSION, LOCAL, TABLES
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--host", default="wrds", help="the SSH host alias (see above)")
     parser.add_argument("--days-file", type=Path, help="one YYYY-MM-DD per line (default: every trading day)")
-    parser.add_argument("--remote", default="/scratch/mit/abprada/taq_out")
+    parser.add_argument("--remote", help="default /scratch/mit/abprada/taq_out, or taq_prices with --prices")
     parser.add_argument("--streams", type=int, default=4)
     parser.add_argument("--every", type=float, default=10, help="minutes between rounds")
     parser.add_argument("--delete-remote", action="store_true", help="delete checked days from WRDS scratch")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--prices", action="store_true", help="the price-only pull (taq_cloud_day.py --prices)")
     args = parser.parse_args()
+    if args.prices:
+        VERSION, LOCAL, TABLES = _job.code_version(prices=True), ROOT / "data" / "raw" / "taq" / "prices", ["prices"]
+    args.remote = args.remote or f"/scratch/mit/abprada/{'taq_prices' if args.prices else 'taq_out'}"
 
     if subprocess.run(["ssh", "-O", "check", args.host], capture_output=True, check=False).returncode != 0:
         raise SystemExit(f"no shared SSH connection to {args.host}: run `ssh -fN {args.host}` first (password + Duo)")
@@ -149,9 +176,14 @@ def main() -> None:
                 else:
                     checked.append(ymd)
             if checked:
-                pd.DataFrame({"day": checked, "version": VERSION,
-                              "checked_at": pd.Timestamp.now().isoformat(timespec="seconds")}).to_csv(
-                    log, mode="a", header=not log.exists(), index=False)
+                record = pd.DataFrame({"day": checked, "version": VERSION,
+                                       "checked_at": pd.Timestamp.now().isoformat(timespec="seconds")})
+                if args.prices:
+                    record["against_bars"] = [against_bars(ymd) for ymd in checked]
+                    for ymd, diff in zip(checked, record["against_bars"]):
+                        if diff:
+                            print(f"{ymd}: differs from the full pull's bars: {diff}", flush=True)
+                record.to_csv(log, mode="a", header=not log.exists(), index=False)
                 done |= set(checked)
                 if args.delete_remote:
                     for i in range(0, len(checked), 200):
