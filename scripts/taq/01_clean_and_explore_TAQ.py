@@ -11,7 +11,7 @@ def _(mo):
 
     ## 0. Table heads
 
-    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/raw/taq/pull/20190604/`, the WRDS pull as downloaded, defined in `explanations/taq_pull.md`), and that day's master file (`data/raw/taq/master/`).
+    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/raw/taq/pull/20190604/`, the WRDS pull as downloaded, defined in `explanations/taq/taq_pull.md`), and that day's master file (`data/raw/taq/master/`).
 
     **What to look at:** the keys (`symbol`, `bucket`, `bar`, the `cells` codes), the units (prices in dollars, `last_trade_time` in nanoseconds after midnight) and the size of each table.
     """)
@@ -31,7 +31,6 @@ def _():
     from dsr.crsp import class_on, is_common_stock, read_name_records, security_type
     from dsr.taq_link import PILOT_END, PILOT_START, WHEN_ISSUED_SUFFIXES, link_permnos, mark_primary, pilot_groups
     from dsr.crsp import DAILY_COLUMNS as CRSP_COLUMNS
-    from dsr.panel import LARGE_CAP
     from dsr.taq_split import CAP_MIN, CODES, DOLLAR_VOLUME_MIN, DOLLARS_BEFORE_CUTOFF_MIN, PRICE_MIN, UNIVERSE_TYPES, stack_panels, stock_days, write_decision_days
 
     return (
@@ -39,7 +38,6 @@ def _():
         CODES,
         DOLLARS_BEFORE_CUTOFF_MIN,
         DOLLAR_VOLUME_MIN,
-        LARGE_CAP,
         PILOT_END,
         PILOT_START,
         PRICE_MIN,
@@ -66,7 +64,7 @@ def _():
 
 @app.cell
 def _(mo):
-    DATA_DIR = mo.notebook_dir().parent / "data"
+    DATA_DIR = mo.notebook_dir().parents[1] / "data"
     PULL_DIR = DATA_DIR / "raw" / "taq" / "pull"  # the WRDS pull, one folder per WCT day: daily, cells, bars, audit
     MASTER_DIR = DATA_DIR / "raw" / "taq" / "master"  # mastm_<YYYYMMDD>.parquet, every column as text
     DAY = "20190604"
@@ -246,7 +244,7 @@ def _(mo):
 
     1. **Nothing is lost silently:** raw trades minus each removal step equal the kept trades, every day and venue (the cell stops otherwise). Yes: 166.8 billion raw trades, 161.2 billion (96.6%) kept.
     2. **How much each step removes, and whether that changes over time** (plot): sale conditions remove about 1% of off-exchange trades in 2014 and 3 to 4% in 2022, mostly derivatively priced odd lots, which the whitelist exists to exclude; prices under $1 about 1 to 2%; cancellations a tiny share. In November 2021 late-reported odd lots double the off-exchange exclusions, which will show as a dip in retail counts.
-    3. **Every correction pairs with its record** (table): `unpaired` is 0 except on 2015-02-11, whose 28,148 corrections have records on another venue (left as printed, see `explanations/taq_pull.md`, section 10). `record_after_cutoff` counts corrections ignored because they were published after 15:50.
+    3. **Every correction pairs with its record** (table): `unpaired` is 0 except on 2015-02-11, whose 28,148 corrections have records on another venue (left as printed, see `explanations/taq/taq_pull.md`, section 10). `record_after_cutoff` counts corrections ignored because they were published after 15:50.
 
     Codes: `step` items are `raw`, the removals (`records`, `cancelled_or_erroneous`, `sale_condition`, `price_or_size`), `kept` and `restored_original` (corrected trades given back their original print). `ctm` items are the correction codes (`01` corrected, `07` erroneous, `08` cancelled; their records `12`, `11`, `10`), `unmatched` (not found in `wct`), `record_after_cutoff` and `unpaired`.
     """)
@@ -850,7 +848,7 @@ def _(mo):
 
     **Marked on every plot:** the Tick Size Pilot (2016-10 to 2018-09, shaded), zero commissions (2019-10-07), COVID (2020-03), fractional shares printing as one-share trades (2021-02-16) and the meme surge (late January 2021).
 
-    **Columns** (meanings in `explanations/TAQ/pulled_data_full.md`): `bjzz_*` retail trades by the sub-penny rule, `mid_*` by the midpoint rule, `off_*` all off-exchange, `qr_*` the quote rule on every venue and `exch_qr_*` on exchanges only, `both_signed` and `same_sign` how often the two retail rules sign the same trade and agree.
+    **Columns** (meanings in `explanations/taq/pulled_data_full.md`): `bjzz_*` retail trades by the sub-penny rule, `mid_*` by the midpoint rule, `off_*` all off-exchange, `qr_*` the quote rule on every venue and `exch_qr_*` on exchanges only, `both_signed` and `same_sign` how often the two retail rules sign the same trade and agree.
     """)
     return
 
@@ -1371,7 +1369,7 @@ def _(mo):
     mo.md(r"""
     ### 6.5 The trading universe: what makes a stock liquid
 
-    **Purpose:** the models are scored and traded on the stocks whose previous market cap is at least $1B (`dsr.panel.LARGE_CAP`), and the target is demeaned separately within that group. Market cap stands in for what matters to a strategy that trades at the close every day: what a stock costs to trade, and how much of it can be traded. This section measures those directly, per stock and day, and compares candidate rules for the trading universe. The rules are compared on liquidity only, not on returns or model results, so the choice is made on cost grounds rather than on which universe backtests best. Training days only, on the stock-days that pass the cleaning rules (`train_daily_clean`).
+    **Purpose:** the models were scored and traded on the stocks whose previous market cap is at least $1B (until v3), and the target was demeaned separately within that group. Market cap stands in for what matters to a strategy that trades at the close every day: what a stock costs to trade, and how much of it can be traded. This section measures those directly, per stock and day, and compares candidate rules for the trading universe. The rules are compared on liquidity only, not on returns or model results, so the choice is made on cost grounds rather than on which universe backtests best. Training days only, on the stock-days that pass the cleaning rules (`train_daily_clean`).
 
     **The measures**, each known by the decision day's 15:50:
     - `cap`: the previous close's market cap, the current rule;
@@ -1386,7 +1384,7 @@ def _(mo):
 
 
 @app.cell
-def _(LARGE_CAP, pd, train_daily, train_daily_clean):
+def _(pd, train_daily, train_daily_clean):
     _calendar = pd.DatetimeIndex(sorted(train_daily["day"].unique()))
     _history = train_daily[["day", "permno"]].assign(  # every written stock-day, so the windows see the whole history
         spread_today=train_daily["spread_bp"],
@@ -1406,7 +1404,7 @@ def _(LARGE_CAP, pd, train_daily, train_daily_clean):
 
     liquidity = train_daily_clean[["day", "permno", "security_type", "price_prev", "dollar_volume_prev"]].assign(
         cap=train_daily_clean["cap_prev"] / 1e3,  # $ millions
-        large=train_daily_clean["cap_prev"] >= LARGE_CAP,
+        large=train_daily_clean["cap_prev"] >= 1_000_000,  # the $1B rule (CRSP cap in $ thousands)
         spread_today=train_daily_clean["spread_bp"],
         spread_20d=_trailing("spread_today", "median"),
         dollar_volume_20d=_trailing("dollar_volume", "mean"),
