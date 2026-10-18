@@ -109,3 +109,80 @@ def test_fit_and_predict_run_end_to_end_on_a_few_images():
     net, scale, info = fit(images, y, np.arange(48), np.arange(48, 64), p, on_epoch=epochs.append)
     assert len(epochs) == 2 and info["epochs"] in (1, 2) and scale == pytest.approx(float(np.std(y[:48])))
     assert predict(net, images, np.arange(10)).shape == (10,)
+
+
+from dsr.cnn import (CONTEXT_DAYS, DAY_SLOTS, HOUR_SLOTS, LAST_FULL, NIGHT_SLOT, W_BARS, W_HEIGHT, W_PRICE_ROWS,  # noqa: E402
+                     W_WIDTH, WINDOW_DAYS, HourWindows, hour_table, moving_average, render_window)
+
+
+def _session(n_bars, permno=1):
+    bar = np.arange(n_bars)
+    out = pd.DataFrame({"permno": permno, "bar": bar, "open": 10.0 + bar, "high": 10.5 + bar, "low": 9.5 + bar,
+                        "close": 10.2 + bar})
+    for c in FLOW_COLUMNS:
+        out[c] = 1.0
+    return out
+
+
+def test_hour_table_keeps_the_cutoff_hour_and_adds_the_last_ten_minutes_only_to_the_full_last_bar():
+    ten = _session(1).assign(open=60.0, high=61.0, low=59.0, close=60.5)
+    night = _bars([(1, "prev_evening", 0, 7.0, 5, 1), (1, "pre_open", 0, 8.0, 5, 1)])
+    t = hour_table(_session(38), ten, night, pd.Series({1: 9.0}), 38)
+    assert t.loc[(1, 0), "open"] == 10.0 and t.loc[(1, 0), "high"] == 15.5 and t.loc[(1, 0), "shares"] == 6
+    assert t.loc[(1, 6), "close"] == 47.2 and t.loc[(1, 6), "shares"] == 2  # bars 36-37: 15:30 to the cutoff
+    assert t.loc[(1, LAST_FULL), "close"] == 60.5 and t.loc[(1, LAST_FULL), "high"] == 61.0
+    assert t.loc[(1, LAST_FULL), "shares"] == 3 and t.loc[(1, LAST_FULL), "open"] == 46.0
+    night_bar = t.loc[(1, NIGHT_SLOT)]
+    assert (night_bar["open"], night_bar["close"], night_bar["high"], night_bar["low"]) == (9.0, 8.0, 9.0, 8.0)
+    early = hour_table(_session(20), ten, night, pd.Series({1: 9.0}), 20)  # an early close: the last hour is slot 3
+    assert early.loc[(1, 3), "shares"] == 2 and early.loc[(1, LAST_FULL), "shares"] == 3
+    assert (1, 4) not in early.index
+
+
+def test_moving_average_skips_missing_closes_and_needs_enough_of_them():
+    closes = torch.tensor([[1.0, 2.0, float("nan"), 3.0, 4.0, 5.0]])
+    ma = moving_average(closes, hours=3, at_least=2).numpy()[0]
+    assert np.isnan(ma[0]) and ma[1] == 1.5 and ma[2] == 1.5 and ma[3] == 2.5 and ma[5] == 4.0
+
+
+def _context(b=1):
+    """CONTEXT_DAYS days of stored slots: day k's prices are around 100 + k; the last ten minutes jump to 200."""
+    prices = np.full((b, CONTEXT_DAYS, DAY_SLOTS, 4), np.nan, np.float32)
+    for k in range(CONTEXT_DAYS):
+        prices[:, k, :HOUR_SLOTS] = [100 + k, 100.5 + k, 99.5 + k, 100 + k]
+        prices[:, k, LAST_FULL] = [100 + k, 200, 99.5 + k, 200]
+    prices[:, -1, NIGHT_SLOT] = [124.0, 124.0, 120.0, 120.0]
+    shares = np.ones((b, CONTEXT_DAYS, DAY_SLOTS), np.float32)
+    colors = np.full((b, CONTEXT_DAYS, DAY_SLOTS, len(COLORS)), 200, np.uint8)
+    return prices, shares, colors
+
+
+def test_render_window_draws_past_days_with_their_last_ten_minutes_and_the_decision_day_without():
+    prices, shares, colors = (torch.as_tensor(a, device=DEVICE) for a in _context())
+    early = torch.zeros(1, CONTEXT_DAYS, dtype=torch.bool, device=DEVICE)
+    img = render_window(prices, shares, colors, early).cpu().numpy()[0]
+    assert img.shape == (4, W_HEIGHT, W_WIDTH) and W_WIDTH == 3 * W_BARS
+    grey = img[0, :W_PRICE_ROWS]
+    assert grey[0, 3 * (HOUR_SLOTS - 1) + 2] == 255  # a past day's last bar closes at 200, the top row
+    today_last = 3 * (W_BARS - 1)  # the decision day's last bar: no jump to 200
+    assert grey[0, today_last:today_last + 3].max() == 0
+    night = 3 * (WINDOW_DAYS - 1) * HOUR_SLOTS  # the night bar, just before the decision day's first bar
+    assert grey[:, night + 1].max() == 255 and img[1, :W_PRICE_ROWS, night + 1].max() == 200
+    assert (img[1:][:, img[0] == 0] == 0).all()  # no color off the chart
+    prices[0, -1, NIGHT_SLOT] = torch.tensor([124.0, 1000.0, 120.0, 1000.0])  # a stray print in the pre-open
+    stray = render_window(prices, shares, colors, early).cpu().numpy()[0]
+    assert (stray[0, :, :night] == img[0, :, :night]).all()  # the scale ignores it
+    assert stray[0, 0, night + 2] == 255  # its close clipped at the top row
+
+
+def test_hour_windows_gather_each_target_s_days_and_leave_missing_days_empty():
+    prices, shares, colors = _context()
+    row_of = np.arange(CONTEXT_DAYS)[None, :]
+    w = HourWindows(prices[0], shares[0], colors[0], row_of, np.zeros(CONTEXT_DAYS, bool), [0, 0],
+                    [CONTEXT_DAYS - 1, 2], DEVICE)
+    img = w.draw(torch.tensor([0, 1], device=DEVICE)).cpu().numpy()
+    expected = render_window(*(torch.as_tensor(a, device=DEVICE) for a in (prices, shares, colors)),
+                             torch.zeros(1, CONTEXT_DAYS, dtype=torch.bool, device=DEVICE)).cpu().numpy()[0]
+    assert (img[0] == expected).all()  # the last day: every gathered day exists
+    first_drawn = 3 * HOUR_SLOTS * (WINDOW_DAYS - 3)  # day 2: only days 0-2 exist, the last three of its window
+    assert img[1, 0, :, :first_drawn].max() == 0 and img[1, 0, :, first_drawn:].max() == 255
