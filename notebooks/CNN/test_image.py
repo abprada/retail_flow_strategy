@@ -40,7 +40,7 @@ def _():
 
     from dsr.panel import LARGE_CAP, MIN_RETAIL_TRADES, SESSION_BARS
 
-    return LARGE_CAP, MIN_RETAIL_TRADES, SESSION_BARS, ds, mo, np, pd, plt, pq
+    return LARGE_CAP, SESSION_BARS, ds, mo, np, pd, plt, pq
 
 
 @app.cell
@@ -623,6 +623,381 @@ def _(PRICE_FEATURES, VOLUME_FEATURES, cross_sections, mo):
     channel_corr = _px.corr().round(2)
     mo.vstack([mo.md(f"**How much the color values overlap:** correlations of the six pixel values across the "
                      f"{len(_px):,} large-cap bars of the example days."), channel_corr])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Two bars before the session: the previous day's last ten minutes, then the night
+
+    The session image starts at 09:30, so everything between the previous trading day's cutoff and the open is missing. Two more bars, drawn first, hold it:
+
+    1. **The previous day's last ten minutes** (`prev_last10`: from its cutoff to its close), an ordinary ten-minute bar: its round-lot prices (`px_`, as the session bars), its volume and its colors from its `bars` row, its volume capped as below. Every image stops at the cutoff, so no other image shows these ten minutes, among the busiest of the day.
+    2. **The night** (`prev_evening`, the previous day's close to midnight, and `pre_open`, midnight to 09:30 on the decision day), one bar:
+        - **Its open is the previous day's last round-lot price** (the first bar's close), **its close the last trade before 09:30** (the pre-open's, else the evening's), and **its high and low are just the larger and the smaller of the two**, so it spans the overnight move and nothing else. The price-only pull has no round-lot prices outside the session and the last ten minutes, so the extremes of the evening and pre-open, often single odd lots, are left out; the close is still a trade of any size.
+        - **Its colors** are the evening's and pre-open's counts summed, so pre-open retail buying shows on its own instead of inside the last ten minutes' far larger flow.
+
+    **The session alone sets the volume scale:** both bars are scaled like the session bars but capped at the session's tallest bar. The last ten minutes are usually the busiest bar of all, and on their own scale they would flatten every session bar; capped, their colors still carry their flow.
+
+    The auctions are not in the bars (excluded by sale condition), so neither the previous day's closing auction nor today's opening auction is in either bar. Each bar gets the six values of a session bar (`flow`), standardized across the large caps' same bar that day, and abnormal retail activity compares it with the same bar on the previous 20 trading days (at least 15; a day the stock was in the panel without trades in it counts as 0). The image becomes 4 × 64 × 120.
+
+    The examples are the stock-days of the previous section; the table below them covers every large cap on those days.
+    """)
+    return
+
+
+@app.cell
+def _(
+    FLOW_COLUMNS,
+    HISTORY_DAYS,
+    LARGE_CAP,
+    PRICES,
+    PRICE_FEATURES,
+    SESSION_BARS,
+    TAQ_DIR,
+    VOLUME_FEATURES,
+    against_history,
+    cross_sections,
+    draw_four,
+    examples,
+    flow,
+    mo,
+    np,
+    pd,
+    pq,
+    retail,
+    standardize_by_bar,
+):
+    LAST10_BAR, NIGHT_BAR = -2, -1  # their bar numbers: before the session's bar 0
+    NIGHT_PIECES = ["prev_evening", "pre_open"]
+
+
+    def last10_bar(b, px):
+        """The previous day's last ten minutes as a bar: its round-lot prices (px: permno, px_open, px_high, px_low,
+        px_close) and its counts (b: the prev_last10 rows of bars, with FLOW_COLUMNS), one row per stock that traded."""
+        stocks = pd.Index(sorted(b["permno"].unique()), name="permno")
+        prices = (px.set_index("permno")[[f"px_{_p}" for _p in PRICES]]
+                  .rename(columns=lambda _c: _c.removeprefix("px_")).astype(float).reindex(stocks))
+        return prices.join(b.set_index("permno")[FLOW_COLUMNS].astype(float)).reset_index().assign(bar=LAST10_BAR)
+
+
+    def night_bar(b, start):
+        """The evening and pre-open as one bar. b: their bars rows (permno, piece, close, FLOW_COLUMNS); start: each
+        stock's price when the night begins (the previous day's last round-lot price). Open: that price; close: the
+        last trade before 09:30 (the pre-open's, else the evening's), any size; high and low: the larger and the
+        smaller of the two. Counts summed over the two pieces."""
+        stocks = pd.Index(sorted(b["permno"].unique()), name="permno")
+        close = {_p: b[b["piece"] == _p].set_index("permno")["close"].astype(float).reindex(stocks) for _p in NIGHT_PIECES}
+        out = pd.DataFrame({"open": start.reindex(stocks), "close": close["pre_open"].fillna(close["prev_evening"])})
+        out["high"], out["low"] = out[["open", "close"]].max(axis=1), out[["open", "close"]].min(axis=1)
+        counts = b.groupby("permno")[FLOW_COLUMNS].sum().reindex(stocks).astype(float)
+        return out[PRICES].join(counts).reset_index().assign(bar=NIGHT_BAR)
+
+
+    _panel = pq.read_table(TAQ_DIR / "panel_train.parquet",
+                           columns=["day", "permno", "cap_prev", "early_close"]).to_pandas()
+    _days = list(pd.DatetimeIndex(sorted(_panel["day"].unique())))
+    _members = _panel.groupby("day")["permno"].agg(set)
+    _early = _panel.groupby("day")["early_close"].first()
+    _before = ["prev_last10", *NIGHT_PIECES]
+
+
+    def _read(day, columns, pieces, table="bars"):
+        return pq.read_table(TAQ_DIR / "train" / f"{pd.Timestamp(day):%Y%m%d}" / f"{table}.parquet",
+                             columns=["permno", "piece", "bar", *columns],
+                             filters=[("piece", "in", pieces)]).to_pandas()
+
+
+    _pixels = [f"{_c}_px" for _c in PRICE_FEATURES + VOLUME_FEATURES]
+    overnight_examples, _stats = [], []
+    for _day in mo.status.progress_bar(sorted({pd.Timestamp(_e["day"]) for _e in examples}),
+                                       title="Building the two bars before the session"):
+        _i = _days.index(_day)
+        _stocks = set(_panel.loc[(_panel["day"] == _day) & (_panel["cap_prev"] >= LARGE_CAP), "permno"])
+        _b = _read(_day, [*PRICES, *FLOW_COLUMNS], _before)
+        _b = _b[_b["permno"].isin(_stocks)]
+        _px = _read(_day, [f"px_{_p}" for _p in PRICES], ["prev_last10"], "prices")
+        _last10 = last10_bar(_b[_b["piece"] == "prev_last10"], _px[_px["permno"].isin(_stocks)])
+        _night = night_bar(_b[_b["piece"].isin(NIGHT_PIECES)], _last10.set_index("permno")["close"])
+        _extra = pd.concat([_last10, _night], ignore_index=True)
+        _today = pd.concat([_extra[["permno", "bar"]], flow(_extra)], axis=1)
+
+        _history = []
+        for _d in _days[_i - HISTORY_DAYS:_i]:  # each day a stock was in the panel; no trades in a bar: 0
+            _in = sorted(_stocks & _members[_d])
+            _h = _read(_d, ["mid_buy_trades", "mid_sell_trades"], _before)
+            _h["bar"] = np.where(_h["piece"] == "prev_last10", LAST10_BAR, NIGHT_BAR)
+            _h = (_h.groupby(["permno", "bar"])[["mid_buy_trades", "mid_sell_trades"]].sum()
+                  .reindex(pd.MultiIndex.from_product([_in, [LAST10_BAR, NIGHT_BAR]], names=["permno", "bar"]),
+                           fill_value=0).astype(float))
+            _trades, _ = retail(_h["mid_buy_trades"], _h["mid_sell_trades"])
+            _history.append(_h.index.to_frame(index=False).assign(retail_trades=_trades.to_numpy()))
+        _today = standardize_by_bar(against_history(_today, pd.concat(_history, ignore_index=True)),
+                                    PRICE_FEATURES + VOLUME_FEATURES)
+
+        _spx = (_read(_day, [f"px_{_p}" for _p in PRICES], ["session"], "prices")
+                .rename(columns=lambda _c: _c.removeprefix("px_")).astype({_p: float for _p in PRICES}))
+        _sb = _read(_day, ["shares"], ["session"])
+        _s = pd.DataFrame({"session_high": _spx.groupby("permno")["high"].max(),
+                           "session_low": _spx.groupby("permno")["low"].min(),
+                           "session_max_shares": _sb.groupby("permno")["shares"].max()}
+                          ).reindex(pd.Index(sorted(_stocks), name="permno"))
+        _s = (_s.join(_last10.set_index("permno")[["high", "low", "shares"]].add_prefix("last10_"))
+              .join(_night.set_index("permno")[["high", "low", "shares"]].add_prefix("night_")))
+        _s["evening"] = _s.index.isin(_b.loc[_b["piece"] == "prev_evening", "permno"])
+        _s["pre_open"] = _s.index.isin(_b.loc[_b["piece"] == "pre_open", "permno"])
+        _stats.append(_s.reset_index().assign(day=_day))
+
+        _n = SESSION_BARS[bool(_early[_day])]
+        _cs = cross_sections[pd.to_datetime(cross_sections["day"]) == _day]
+        for _e in [_e for _e in examples if pd.Timestamp(_e["day"]) == _day]:
+            _p = _e["permno"]
+            _session = (_spx[_spx["permno"] == _p].set_index("bar")[PRICES]
+                        .join(_sb[_sb["permno"] == _p].set_index("bar")[["shares"]], how="outer")
+                        .join(_cs[_cs["permno"] == _p].set_index("bar")[_pixels], how="outer")
+                        .astype(float).reindex(range(_n)))
+            _first = (_extra[_extra["permno"] == _p].set_index("bar")[[*PRICES, "shares"]]
+                      .join(_today[_today["permno"] == _p].set_index("bar")[_pixels])
+                      .astype(float).reindex([LAST10_BAR, NIGHT_BAR]))
+            _image = pd.concat([_first, _session])
+            # the session alone sets the volume scale: the two bars before it are capped at its tallest bar
+            _image.loc[[LAST10_BAR, NIGHT_BAR], "shares"] = np.fmin(_image.loc[[LAST10_BAR, NIGHT_BAR], "shares"],
+                                                                    _session["shares"].max())
+            overnight_examples.append({**_e, "with_overnight": draw_four(_image)})
+    overnight_stats = pd.concat(_stats, ignore_index=True)
+    return overnight_examples, overnight_stats
+
+
+@app.cell
+def _(np, overnight_examples, plt):
+    _titles = ["grey, session only", "grey, with the two bars (left of the yellow line)",
+               "red, green, blue, with the two bars"]
+    fig_overnight, _axes = plt.subplots(len(overnight_examples), 3, figsize=(13, 1.35 * len(overnight_examples) + 0.7),
+                                        squeeze=False)
+    for _i, _e in enumerate(overnight_examples):
+        _axes[_i, 0].imshow(_e["image"][0], cmap="gray", vmin=0, vmax=255, interpolation="nearest")
+        _axes[_i, 1].imshow(_e["with_overnight"][0], cmap="gray", vmin=0, vmax=255, interpolation="nearest")
+        _axes[_i, 2].imshow(np.moveaxis(_e["with_overnight"][1:], 0, -1), interpolation="nearest")
+        _axes[_i, 0].set_ylabel(f"{_e['symbol']}\n{_e['day']:%Y-%m-%d}\n\\${_e['cap_prev'] / 1e6:.0f}B", fontsize=7)
+        for _j, _ax in enumerate(_axes[_i]):
+            if _j > 0:
+                _ax.axvline(5.5, color="yellow", lw=0.6)
+            _ax.set_xticks([])
+            _ax.set_yticks([])
+            if _i == 0:
+                _ax.set_title(_titles[_j], fontsize=8)
+    fig_overnight.suptitle("The same stock-days with two bars first: the previous day's last ten minutes, then the "
+                           "night (its evening and today's pre-open)", fontsize=9)
+    fig_overnight.tight_layout()
+    fig_overnight
+    return
+
+
+@app.cell
+def _(mo, np, overnight_stats, pd):
+    _s = overnight_stats
+    _top = np.fmax(np.fmax(_s["session_high"], _s["last10_high"]), _s["night_high"])
+    _bottom = np.fmin(np.fmin(_s["session_low"], _s["last10_low"]), _s["night_low"])
+    _share = (_s["session_high"] - _s["session_low"]) / (_top - _bottom)
+    _last10_beyond = (_s["last10_high"] > _s["session_high"]) | (_s["last10_low"] < _s["session_low"])
+    _night_beyond = ((_s["night_high"] > np.fmax(_s["session_high"], _s["last10_high"]))
+                     | (_s["night_low"] < np.fmin(_s["session_low"], _s["last10_low"])))
+    overnight_summary = pd.Series({
+        "large-cap stock-days": len(_s),
+        "with evening trades, %": 100 * _s["evening"].mean(),
+        "with pre-open trades, %": 100 * _s["pre_open"].mean(),
+        "last ten minutes reach beyond the session's range, %": 100 * _last10_beyond.mean(),
+        "the night's move reaches beyond both, %": 100 * _night_beyond.mean(),
+        "session's share of the price rows, median, %": 100 * _share.median(),
+        "session's share of the price rows, 10th percentile, %": 100 * _share.quantile(0.1),
+        "session squeezed into less than half the price rows, %": 100 * (_share < 0.5).mean(),
+        "last ten minutes capped (taller than the session's tallest bar), %":
+            100 * (_s["last10_shares"] > _s["session_max_shares"]).mean(),
+        "last ten minutes / tallest session bar, median": (_s["last10_shares"] / _s["session_max_shares"]).median(),
+        "the night capped (taller than the session's tallest bar), %":
+            100 * (_s["night_shares"] > _s["session_max_shares"]).mean(),
+    }).round(2).to_frame("value")
+    mo.vstack([mo.md("**What the two bars do to the images,** every large cap on the example days:"),
+               mo.ui.table(overnight_summary.reset_index(names="measure"), selection=None, pagination=False)])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 21 days in hourly bars
+
+    A look at the multi-day image proposed in `explanations/CNN/multiday_design.md`, on the same example stock-days: the 21 trading days up to the decision day's cutoff, 7 bars a day, 4 × 96 × 441 (76 price rows, an empty row, 19 volume rows: over 21 days the price range is wide, and at 64 rows most hourly bars were one or two rows tall).
+
+    - **Hourly bars:** 09:30, 10:30, 11:30, 12:30, 13:30 and 14:30, then 15:30 to the close. A past day's last bar includes its 15:50-16:00 (the next decision day's `prev_last10`); today's stops at the 15:50 cutoff. Every day takes 7 slots, so an hour sits at the same place every day; on early closes the slots after 12:50 (13:00 on past days) stay empty. Each bar is built from the ten-minute bars: the first round-lot open, the highest high, the lowest low, the last round-lot close, and the counts summed.
+    - **Prices adjusted for splits** to the decision day's terms (a past price over the product of CRSP's `facprc_t` on the days after it), and scaled from the window's highest high or moving average to its lowest.
+    - **The moving average line:** at each bar, the average close of the 147 hourly bars up to it (21 days, so it needs the 21 days before the window too), drawn in grey through each bar's middle column and joined column by column; it has no color.
+    - **Volume:** shares, every trade, scaled to the window's tallest bar, at least one row for a bar that traded.
+    - **Colors:** the six values of each hourly bar, standardized across that day's large caps in each hour; abnormal retail activity compares a bar with the same hour over the 20 trading days before its day.
+    - **No night bar:** the night shows only as the jump from one day's last bar to the next day's first.
+
+    The thin lines between days in the figure are drawn on the plot, not in the image.
+    """)
+    return
+
+
+@app.cell
+def _(
+    FLOW_COLUMNS,
+    HISTORY_DAYS,
+    LARGE_CAP,
+    PRICES,
+    PRICE_FEATURES,
+    SESSION_BARS,
+    TAQ_DIR,
+    VOLUME_FEATURES,
+    against_history,
+    examples,
+    flow,
+    mo,
+    np,
+    pd,
+    pq,
+    retail,
+    standardize_by_bar,
+):
+    WINDOW_DAYS, DAY_SLOTS = 21, 7  # 21 days of 7 hourly bars
+    MA_BARS = WINDOW_DAYS * DAY_SLOTS  # the moving average: the 147 hourly closes up to each bar
+    W_PRICE_ROWS, W_VOLUME_ROWS = 76, 19  # 96 rows with the empty one, as Jiang, Kelly and Xiu's 60-day images
+
+    _panel = pq.read_table(TAQ_DIR / "panel_train.parquet",
+                           columns=["day", "permno", "cap_prev", "early_close", "facprc_t"]).to_pandas()
+    _days = list(pd.DatetimeIndex(sorted(_panel["day"].unique())))
+    _members = _panel.groupby("day")["permno"].agg(set)
+    _early = _panel.groupby("day")["early_close"].first()
+    _factor = _panel.set_index(["day", "permno"])["facprc_t"]
+
+
+    def _read(day, table, columns, piece):
+        return pq.read_table(TAQ_DIR / "train" / f"{pd.Timestamp(day):%Y%m%d}" / f"{table}.parquet",
+                             columns=["permno", "bar", *columns], filters=[("piece", "==", piece)]).to_pandas()
+
+
+    def hourly(i, last):
+        """Day i's hourly bars (permno, bar = hour slot 0-6) for every stock in its files: the counts summed and the
+        round-lot open, high, low and close of its ten-minute bars, plus its 15:50-16:00 from day i + 1's prev_last10
+        when day i is before `last`."""
+        px_cols = [f"px_{_p}" for _p in PRICES]
+        rename = lambda df: df.rename(columns=lambda _c: _c.removeprefix("px_"))
+        b = _read(_days[i], "bars", FLOW_COLUMNS, "session")
+        px = rename(_read(_days[i], "prices", px_cols, "session"))
+        rows = b.merge(px, on=["permno", "bar"], how="outer").assign(order=lambda d: d["bar"])
+        last_slot = (SESSION_BARS[bool(_early[_days[i]])] - 1) // 6
+        rows["bar"] = np.minimum(rows["bar"] // 6, 6)
+        if i < last:  # the day's last ten minutes, from the next decision day
+            b10 = _read(_days[i + 1], "bars", FLOW_COLUMNS, "prev_last10")
+            px10 = rename(_read(_days[i + 1], "prices", px_cols, "prev_last10"))
+            ten = b10.merge(px10, on=["permno", "bar"], how="outer").assign(bar=last_slot, order=99)
+            rows = pd.concat([rows, ten], ignore_index=True)
+        rows = rows.sort_values(["permno", "bar", "order"])
+        rows[PRICES] = rows[PRICES].astype(float)
+        g = rows.groupby(["permno", "bar"])
+        out = g[FLOW_COLUMNS].sum().astype(float)
+        out["open"], out["high"], out["low"], out["close"] = (g["open"].first(), g["high"].max(), g["low"].min(),
+                                                              g["close"].last())
+        return out.reset_index()
+
+
+    def colors(i, tables):
+        """The six pixel values of day i's hourly bars for its large caps (tables: hourly bars by day index, including
+        the 20 days before i)."""
+        stocks = set(_panel.loc[(_panel["day"] == _days[i]) & (_panel["cap_prev"] >= LARGE_CAP), "permno"])
+        t = tables[i][tables[i]["permno"].isin(stocks)].reset_index(drop=True)
+        today = pd.concat([t[["permno", "bar"]], flow(t)], axis=1)
+        history = []
+        for j in range(i - HISTORY_DAYS, i):  # each day a stock was in the panel; no trades in an hour: 0
+            slots = (SESSION_BARS[bool(_early[_days[j]])] - 1) // 6 + 1
+            grid = pd.MultiIndex.from_product([sorted(stocks & _members[_days[j]]), range(slots)],
+                                              names=["permno", "bar"]).to_frame(index=False)
+            h = grid.merge(tables[j][["permno", "bar", "mid_buy_trades", "mid_sell_trades"]], how="left").fillna(0)
+            history.append(h[["permno", "bar"]].assign(
+                retail_trades=retail(h["mid_buy_trades"].astype(float), h["mid_sell_trades"].astype(float))[0]))
+        return standardize_by_bar(against_history(today, pd.concat(history, ignore_index=True)),
+                                  PRICE_FEATURES + VOLUME_FEATURES)
+
+
+    def draw_window(w):
+        """One image (uint8, 4 x 96 x 3n) from a window's n hourly bars in order (open, high, low, close, shares, ma and
+        the six *_px values; NaN where a bar has no trades): bars as in draw_four, the moving average as a grey line."""
+        o, h, l, c, ma = (w[_k].to_numpy(dtype=float) for _k in ["open", "high", "low", "close", "ma"])
+        n = len(w)
+        top, bottom = np.nanmax(np.r_[h, ma]), np.nanmin(np.r_[l, ma])
+        span = top - bottom if top > bottom else 1.0
+        row = lambda p: np.round((top - p) / span * (W_PRICE_ROWS - 1))
+        r = np.arange(W_PRICE_ROWS)[:, None]
+        price = np.zeros((W_PRICE_ROWS, 3 * n), dtype=bool)
+        price[:, 0::3], price[:, 2::3] = r == row(o), r == row(c)
+        price[:, 1::3] = (r >= row(h)) & (r <= row(l))
+        line = np.zeros_like(price)
+        mid, ok = 3 * np.arange(n) + 1, ~np.isnan(ma)
+        if ok.sum() > 1:
+            cols = np.arange(mid[ok][0], mid[ok][-1] + 1)
+            line[row(np.interp(cols, mid[ok], ma[ok])).astype(int), cols] = True
+        v = w["shares"].to_numpy(dtype=float)
+        filled = np.where(v > 0, np.maximum(1, np.round(v / np.nanmax(v) * W_VOLUME_ROWS)), 0)
+        volume = np.zeros((W_VOLUME_ROWS, 3 * n), dtype=bool)
+        volume[:, 1::3] = np.arange(W_VOLUME_ROWS)[:, None] >= W_VOLUME_ROWS - filled
+        gap = np.zeros((1, 3 * n), dtype=bool)
+        chart, ma_only = np.vstack([price, gap, volume]), np.vstack([line & ~price, gap, volume & False])
+        values = lambda name: np.repeat(np.nan_to_num(w[f"{name}_px"].to_numpy(dtype=float), nan=128), 3)[None, :]
+        in_price = np.arange(chart.shape[0])[:, None] < W_PRICE_ROWS
+        layers = [(chart | ma_only) * 255] + [np.where(chart, np.where(in_price, values(_p), values(_v)), 0)
+                                              for _p, _v in zip(PRICE_FEATURES, VOLUME_FEATURES)]
+        return np.stack(layers).astype(np.uint8)
+
+
+    _pixels = [f"{_c}_px" for _c in PRICE_FEATURES + VOLUME_FEATURES]
+    window_examples = []
+    for _day in mo.status.progress_bar(sorted({pd.Timestamp(_e["day"]) for _e in examples}),
+                                       title="Building the 21-day windows"):
+        _d = _days.index(_day)
+        _first = _d - 2 * WINDOW_DAYS + 1  # the window's 21 days, and the 21 before for the moving average
+        _tables = {_i: hourly(_i, _d) for _i in range(min(_first, _d - WINDOW_DAYS + 1 - HISTORY_DAYS), _d + 1)}
+        _colors = {_i: colors(_i, _tables) for _i in range(_d - WINDOW_DAYS + 1, _d + 1)}
+        for _e in [_e for _e in examples if pd.Timestamp(_e["day"]) == _day]:
+            _p, _bars = _e["permno"], []
+            for _i in range(_first, _d + 1):
+                _later = [_factor.get((_days[_j], _p), 1.0) for _j in range(_i + 1, _d + 1)]
+                _adj = float(np.prod(_later)) if _later else 1.0  # a past price in the decision day's terms
+                _t = (_tables[_i][_tables[_i]["permno"] == _p].set_index("bar")[[*PRICES, "shares"]]
+                      .reindex(range(DAY_SLOTS)))
+                _t[PRICES] = _t[PRICES] / _adj
+                if _i in _colors:
+                    _t = _t.join(_colors[_i][_colors[_i]["permno"] == _p].set_index("bar")[_pixels])
+                _bars.append(_t.assign(day=_i))
+            _all = pd.concat(_bars, ignore_index=True)
+            _closes = _all["close"].dropna()
+            _all["ma"] = _closes.rolling(MA_BARS, min_periods=MA_BARS // 2).mean().reindex(_all.index)
+            _window = _all[_all["day"] > _d - WINDOW_DAYS].reset_index(drop=True)
+            window_examples.append({**_e, "window": draw_window(_window)})
+    return DAY_SLOTS, WINDOW_DAYS, window_examples
+
+
+@app.cell
+def _(DAY_SLOTS, WINDOW_DAYS, np, plt, window_examples):
+    fig_window, _axes = plt.subplots(len(window_examples), 2, figsize=(17, 1.7 * len(window_examples) + 0.8),
+                                     squeeze=False)
+    for _i, _e in enumerate(window_examples):
+        _axes[_i, 0].imshow(_e["window"][0], cmap="gray", vmin=0, vmax=255, interpolation="nearest", aspect="auto")
+        _axes[_i, 1].imshow(np.moveaxis(_e["window"][1:], 0, -1), interpolation="nearest", aspect="auto")
+        _axes[_i, 0].set_ylabel(f"{_e['symbol']}\n{_e['day']:%Y-%m-%d}\n\\${_e['cap_prev'] / 1e6:.0f}B", fontsize=7)
+        for _ax in _axes[_i]:
+            for _k in range(1, WINDOW_DAYS):
+                _ax.axvline(3 * DAY_SLOTS * _k - 0.5, color="steelblue", lw=0.4, alpha=0.6)
+            _ax.set_xticks([])
+            _ax.set_yticks([])
+    _axes[0, 0].set_title("grey: hourly prices, the 21-day moving average and volume", fontsize=8)
+    _axes[0, 1].set_title("red, green, blue: the six values of each hourly bar", fontsize=8)
+    fig_window.suptitle("21 trading days up to the decision day's cutoff, 7 hourly bars a day (4 x 96 x 441); "
+                        "lines between days drawn on the plot only", fontsize=9)
+    fig_window.tight_layout()
+    fig_window
     return
 
 
