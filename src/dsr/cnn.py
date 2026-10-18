@@ -397,14 +397,14 @@ def hour_pixels(table: pd.DataFrame, history: RetailHistory, reference) -> pd.Da
     return standardize_by_slot(f, COLORS, present.index.get_level_values("permno").isin(list(reference)))
 
 
-def hour_arrays(table: pd.DataFrame, pixels: pd.DataFrame, stocks) -> dict[str, np.ndarray]:
-    """Each stock's stored slots, in the order of `stocks`: `prices` (n, DAY_SLOTS, 4: open, high, low, close; NaN
-    without a price), `shares` (n, DAY_SLOTS) and `colors` (n, DAY_SLOTS, 6; 128 when missing)."""
-    idx = pd.MultiIndex.from_product([pd.Index(stocks, name="permno"), range(DAY_SLOTS)], names=["permno", "slot"])
+def hour_arrays(table: pd.DataFrame, pixels: pd.DataFrame, stocks, n_slots: int = DAY_SLOTS) -> dict[str, np.ndarray]:
+    """Each stock's stored slots, in the order of `stocks`: `prices` (n, n_slots, 4: open, high, low, close; NaN
+    without a price), `shares` (n, n_slots) and `colors` (n, n_slots, 6; 128 when missing)."""
+    idx = pd.MultiIndex.from_product([pd.Index(stocks, name="permno"), range(n_slots)], names=["permno", "slot"])
     t, n = table.reindex(idx), len(stocks)
-    c = pixels.reindex(idx)[[f"{k}_px" for k in COLORS]].to_numpy(float).reshape(n, DAY_SLOTS, len(COLORS))
-    return {"prices": t[PRICES].to_numpy(np.float32).reshape(n, DAY_SLOTS, 4),
-            "shares": np.nan_to_num(t["shares"].to_numpy(np.float32)).reshape(n, DAY_SLOTS),
+    c = pixels.reindex(idx)[[f"{k}_px" for k in COLORS]].to_numpy(float).reshape(n, n_slots, len(COLORS))
+    return {"prices": t[PRICES].to_numpy(np.float32).reshape(n, n_slots, 4),
+            "shares": np.nan_to_num(t["shares"].to_numpy(np.float32)).reshape(n, n_slots),
             "colors": np.where(np.isnan(c), 128, c).astype(np.uint8)}
 
 
@@ -421,16 +421,63 @@ def moving_average(closes: torch.Tensor, hours: int = MA_HOURS, at_least: int = 
     return torch.where(window_count >= at_least, window_sum / window_count.clamp_min(1), torch.full_like(closes, float("nan")))
 
 
+def _chart(p: torch.Tensor, ma: torch.Tensor, v: torch.Tensor, c: torch.Tensor, price_rows: int, volume_rows: int,
+           volume_quantile: float | None, in_scale: torch.Tensor | None = None) -> torch.Tensor:
+    """Draw a batch of chart images (float, B x 4 x (price_rows + 1 + volume_rows) x 3N, 0-255) from N bars: prices p
+    (B x N x 4, open, high, low, close; NaN draws nothing), the moving average ma (B x N; NaN where none), volume v
+    (B x N; 0 for none) and colors c (B x N x 6). Prices are scaled to the highest high or average and the lowest of
+    the bars in `in_scale` (all when None), the others clipped at the image's edge; volume to the `volume_quantile` of
+    the bars that traded (their largest when None), taller bars capped, at least one row for a bar that traded. Grey:
+    the open as a tick on the bar's left column, the high-low range in its middle column, the close as a tick on its
+    right column, the moving average as a 3-pixel segment per bar, the volume bar in the middle column; red, green,
+    blue: each bar's price colors on its price pixels and its volume colors on its volume pixels."""
+    dev, b, n = p.device, p.shape[0], p.shape[1]
+    width, height = 3 * n, price_rows + 1 + volume_rows
+    nan = torch.isnan
+    keep = torch.ones(n, dtype=torch.bool, device=dev) if in_scale is None else in_scale
+    hi, lo = p[:, keep, 1], p[:, keep, 2]
+    top = torch.maximum(torch.where(nan(hi), -torch.inf, hi).amax(1), torch.where(nan(ma), -torch.inf, ma).amax(1))
+    bottom = torch.minimum(torch.where(nan(lo), torch.inf, lo).amin(1), torch.where(nan(ma), torch.inf, ma).amin(1))
+    span = torch.where(top > bottom, top - bottom, torch.ones_like(top))
+
+    def row(x):  # a price's row, 0 at the top; NaN draws nothing
+        shape = (b,) + (1,) * (x.dim() - 1)
+        return torch.round((top.view(shape) - x) / span.view(shape) * (price_rows - 1))
+
+    r = row(p).clamp(0, price_rows - 1)  # B x N x 4
+    pr = torch.arange(price_rows, device=dev).view(1, price_rows, 1).float()
+    left, right = pr == r[:, None, :, 0], pr == r[:, None, :, 3]
+    middle = (pr >= r[:, None, :, 1]) & (pr <= r[:, None, :, 2])
+    price = torch.stack([left, middle, right], dim=-1).reshape(b, price_rows, width)
+    line = (pr == row(ma)[:, None, :]).repeat_interleave(3, dim=2)
+    vv = torch.where(v > 0, v, torch.full_like(v, float("nan")))
+    scale = (torch.nanquantile(vv, volume_quantile, dim=1) if volume_quantile is not None
+             else torch.where(nan(vv), -torch.inf, vv).amax(1))
+    filled = torch.where(v > 0, torch.clamp(torch.round(v / scale[:, None] * volume_rows), 1, volume_rows),
+                         torch.zeros_like(v))
+    filled = torch.nan_to_num(filled)
+    vr = torch.arange(volume_rows, device=dev).view(1, volume_rows, 1)
+    bar = vr >= (volume_rows - filled)[:, None, :]
+    blank = torch.zeros_like(bar)
+    vol = torch.stack([blank, bar, blank], dim=-1).reshape(b, volume_rows, width)
+    gap = torch.zeros(b, 1, width, dtype=torch.bool, device=dev)
+    chart = torch.cat([price, gap, vol], dim=1)  # the bars: colored
+    grey = chart | torch.cat([line, gap, torch.zeros_like(vol)], dim=1)  # with the moving average: grey only
+    cc = c.float().repeat_interleave(3, dim=1)  # B x width x 6
+    in_price = (torch.arange(height, device=dev) < price_rows).view(1, height, 1, 1)
+    per_row = torch.where(in_price, cc[:, None, :, :3], cc[:, None, :, 3:])
+    color = (per_row * chart[..., None]).permute(0, 3, 1, 2)
+    return torch.cat([grey[:, None].float() * 255, color], dim=1)
+
+
 def render_window(prices: torch.Tensor, shares: torch.Tensor, colors: torch.Tensor, early: torch.Tensor) -> torch.Tensor:
     """Draw a batch of multi-day images (float, B x 4 x W_HEIGHT x W_WIDTH, 0-255) from CONTEXT_DAYS days of stored
     slots, oldest first (prices B x D x DAY_SLOTS x 4 with NaN, shares B x D x DAY_SLOTS, colors B x D x DAY_SLOTS x 6,
     early B x D: the day was an early close). The window is the last WINDOW_DAYS days' hourly bars, each past day's
     last bar with its last ten minutes, the decision day's night before its first bar; the moving average runs over the
     hourly closes of every gathered day. Prices are scaled to the window's highest high or average and its lowest, the
-    night left out (it is clipped at the image's edge: its close is any trade, and a stray print would squeeze the window);
-    volume to the VOLUME_QUANTILE of its bars, taller bars capped. Grey: the bars (ticks for open and close, the range
-    in the middle column), the moving average as a 3-pixel segment per bar, the volume bars; red, green, blue: each
-    bar's price colors on its price pixels and its volume colors on its volume pixels."""
+    night left out (it is clipped at the image's edge: its close is any trade, and a stray print would squeeze the
+    window); volume to the VOLUME_QUANTILE of its bars, taller bars capped (_chart)."""
     dev, b, d = prices.device, prices.shape[0], prices.shape[1]
     base = torch.arange(HOUR_SLOTS, device=dev).view(1, 1, HOUR_SLOTS).expand(b, d, HOUR_SLOTS)
     last = torch.where(early, 3, 6).view(b, d, 1)
@@ -447,41 +494,9 @@ def render_window(prices: torch.Tensor, shares: torch.Tensor, colors: torch.Tens
     c = seq(hourly_c, colors[:, d - 1, NIGHT_SLOT])
     n_past = (WINDOW_DAYS - 1) * HOUR_SLOTS
     ma = torch.cat([ma[:, :n_past], torch.full((b, 1), float("nan"), device=dev), ma[:, n_past:]], dim=1)
-    nan = torch.isnan
     hourly = torch.ones(W_BARS, dtype=torch.bool, device=dev)
-    hourly[n_past] = False  # the night is left out of the scale: its close is any trade, and a stray print would
-    hi, lo = p[:, hourly, 1], p[:, hourly, 2]  # squeeze the window; it is clipped at the image's edge instead
-    top = torch.maximum(torch.where(nan(hi), -torch.inf, hi).amax(1), torch.where(nan(ma), -torch.inf, ma).amax(1))
-    bottom = torch.minimum(torch.where(nan(lo), torch.inf, lo).amin(1), torch.where(nan(ma), torch.inf, ma).amin(1))
-    span = torch.where(top > bottom, top - bottom, torch.ones_like(top))
-
-    def row(x):  # a price's row, 0 at the top; NaN draws nothing
-        shape = (b,) + (1,) * (x.dim() - 1)
-        return torch.round((top.view(shape) - x) / span.view(shape) * (W_PRICE_ROWS - 1))
-
-    r = row(p).clamp(0, W_PRICE_ROWS - 1)  # B x W_BARS x 4; only the night can fall outside
-    pr = torch.arange(W_PRICE_ROWS, device=dev).view(1, W_PRICE_ROWS, 1).float()
-    left, right = pr == r[:, None, :, 0], pr == r[:, None, :, 3]
-    middle = (pr >= r[:, None, :, 1]) & (pr <= r[:, None, :, 2])
-    price = torch.stack([left, middle, right], dim=-1).reshape(b, W_PRICE_ROWS, W_WIDTH)
-    line = (pr == row(ma)[:, None, :]).repeat_interleave(3, dim=2)  # B x W_PRICE_ROWS x W_WIDTH
-    vv = torch.where(v > 0, v, torch.full_like(v, float("nan")))
-    scale = torch.nanquantile(vv, VOLUME_QUANTILE, dim=1)
-    filled = torch.where(v > 0, torch.clamp(torch.round(v / scale[:, None] * W_VOLUME_ROWS), 1, W_VOLUME_ROWS),
-                         torch.zeros_like(v))
-    filled = torch.nan_to_num(filled)
-    vr = torch.arange(W_VOLUME_ROWS, device=dev).view(1, W_VOLUME_ROWS, 1)
-    bar = vr >= (W_VOLUME_ROWS - filled)[:, None, :]
-    blank = torch.zeros_like(bar)
-    vol = torch.stack([blank, bar, blank], dim=-1).reshape(b, W_VOLUME_ROWS, W_WIDTH)
-    gap = torch.zeros(b, 1, W_WIDTH, dtype=torch.bool, device=dev)
-    chart = torch.cat([price, gap, vol], dim=1)  # the bars: colored
-    grey = chart | torch.cat([line, gap, torch.zeros_like(vol)], dim=1)  # with the moving average: grey only
-    cc = c.float().repeat_interleave(3, dim=1)  # B x W_WIDTH x 6
-    in_price = (torch.arange(W_HEIGHT, device=dev) < W_PRICE_ROWS).view(1, W_HEIGHT, 1, 1)
-    per_row = torch.where(in_price, cc[:, None, :, :3], cc[:, None, :, 3:])
-    color = (per_row * chart[..., None]).permute(0, 3, 1, 2)
-    return torch.cat([grey[:, None].float() * 255, color], dim=1)
+    hourly[n_past] = False
+    return _chart(p, ma, v, c, W_PRICE_ROWS, W_VOLUME_ROWS, VOLUME_QUANTILE, hourly)
 
 
 class HourWindows:
@@ -508,3 +523,61 @@ class HourWindows:
         shares = torch.where(has, self.shares[r], torch.zeros_like(self.shares[r]))
         colors = torch.where(has[..., None], self.colors[r], torch.full_like(self.colors[r], 128))
         return render_window(prices, shares, colors, self.early[days.clamp_min(0)])
+
+
+# the daily image (Jiang, Kelly and Xiu's 20-day image): 20 trading days of daily bars and a 20-day moving average
+D_SLOTS = 2  # stored per stock-day: 0 the session to the cutoff (drawn for the decision day), 1 to the close (past days)
+D_DAYS, D_MA_DAYS, D_MA_MIN = 20, 20, 10
+D_CONTEXT = D_DAYS + D_MA_DAYS - 1  # 39 days gathered: the window and its moving average's start
+D_PRICE_ROWS, D_VOLUME_ROWS = 51, 12
+D_HEIGHT, D_WIDTH = D_PRICE_ROWS + 1 + D_VOLUME_ROWS, 3 * D_DAYS  # 64 x 60
+
+
+def daily_table(session: pd.DataFrame, ten: pd.DataFrame | None) -> pd.DataFrame:
+    """One day's two stored daily bars by (permno, slot), from its ten-minute bars (session: permno, bar,
+    FLOW_COLUMNS, open, high, low, close as round-lot prices; ten: its 15:50-16:00, the next decision day's
+    prev_last10 rows, None when unknown): the counts summed and the first open, highest high, lowest low and last
+    close; slot 0 to the cutoff, slot 1 to the close."""
+    parts = [session.assign(slot=0, order=session["bar"]), session.assign(slot=1, order=session["bar"])]
+    if ten is not None and len(ten):
+        parts.append(ten.assign(slot=1, order=99))
+    rows = pd.concat(parts, ignore_index=True).sort_values(["permno", "slot", "order"])
+    rows[PRICES] = rows[PRICES].astype(float)
+    g = rows.groupby(["permno", "slot"])
+    out = g[FLOW_COLUMNS].sum().astype(float)
+    out["open"], out["high"], out["low"], out["close"] = (g["open"].first(), g["high"].max(), g["low"].min(),
+                                                          g["close"].last())
+    return out
+
+
+def render_days(prices: torch.Tensor, shares: torch.Tensor, colors: torch.Tensor) -> torch.Tensor:
+    """Draw a batch of daily images (float, B x 4 x D_HEIGHT x D_WIDTH, 0-255) from D_CONTEXT days of stored daily
+    bars, oldest first (prices B x D x D_SLOTS x 4 with NaN, shares B x D x D_SLOTS, colors B x D x D_SLOTS x 6): the
+    last D_DAYS days, each past day to its close and the decision day to its cutoff, with the D_MA_DAYS moving average
+    of the daily closes (at least D_MA_MIN of them); volume scaled to the window's largest day (_chart)."""
+    dev, b, d = prices.device, prices.shape[0], prices.shape[1]
+    slot = torch.where(torch.arange(d, device=dev) < d - 1, 1, 0).view(1, d, 1).expand(b, d, 1)
+    p = torch.gather(prices, 2, slot[..., None].expand(b, d, 1, 4)).squeeze(2)
+    v = torch.gather(shares, 2, slot).squeeze(2)
+    c = torch.gather(colors, 2, slot[..., None].expand(b, d, 1, colors.shape[-1])).squeeze(2)
+    ma = moving_average(p[..., 3], D_MA_DAYS, D_MA_MIN)
+    w = slice(d - D_DAYS, d)
+    return _chart(p[:, w], ma[:, w], v[:, w], c[:, w], D_PRICE_ROWS, D_VOLUME_ROWS, None)
+
+
+class DayWindows(HourWindows):
+    """The daily images' data on one device, as HourWindows but with D_SLOTS stored daily bars a stock-day; draw(idx)
+    gathers each target's D_CONTEXT days up to its day and renders them (render_days)."""
+
+    height, width, predict_batch = D_HEIGHT, D_WIDTH, 4096
+
+    def draw(self, idx: torch.Tensor) -> torch.Tensor:
+        s, d = self.stock[idx], self.day[idx]
+        days = d[:, None] - torch.arange(D_CONTEXT - 1, -1, -1, device=self.device)  # oldest first
+        rows = torch.where(days >= 0, self.row_of[s[:, None], days.clamp_min(0)], torch.full_like(days, -1))
+        has = (rows >= 0)[..., None]
+        r = rows.clamp_min(0)
+        prices = torch.where(has[..., None], self.prices[r], torch.full_like(self.prices[r], float("nan")))
+        shares = torch.where(has, self.shares[r], torch.zeros_like(self.shares[r]))
+        colors = torch.where(has[..., None], self.colors[r], torch.full_like(self.colors[r], 128))
+        return render_days(prices, shares, colors)

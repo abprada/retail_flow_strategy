@@ -186,3 +186,29 @@ def test_hour_windows_gather_each_target_s_days_and_leave_missing_days_empty():
     assert (img[0] == expected).all()  # the last day: every gathered day exists
     first_drawn = 3 * HOUR_SLOTS * (WINDOW_DAYS - 3)  # day 2: only days 0-2 exist, the last three of its window
     assert img[1, 0, :, :first_drawn].max() == 0 and img[1, 0, :, first_drawn:].max() == 255
+
+
+from dsr.cnn import D_CONTEXT, D_DAYS, D_HEIGHT, D_PRICE_ROWS, D_SLOTS, D_WIDTH, DayWindows, daily_table, render_days  # noqa: E402,I001
+
+
+def test_daily_table_has_the_day_to_the_cutoff_and_to_the_close():
+    ten = _session(1).assign(open=60.0, high=61.0, low=59.0, close=60.5)
+    t = daily_table(_session(38), ten)
+    assert t.loc[(1, 0), "open"] == 10.0 and t.loc[(1, 0), "close"] == 47.2 and t.loc[(1, 0), "shares"] == 38
+    assert t.loc[(1, 1), "close"] == 60.5 and t.loc[(1, 1), "high"] == 61.0 and t.loc[(1, 1), "shares"] == 39
+
+
+def test_render_days_draws_past_days_to_the_close_and_the_decision_day_to_the_cutoff():
+    prices = np.full((1, D_CONTEXT, D_SLOTS, 4), np.nan, np.float32)
+    for k in range(D_CONTEXT):
+        prices[0, k, 0] = [100 + k, 101 + k, 99 + k, 100 + k]
+        prices[0, k, 1] = [100 + k, 200, 99 + k, 200]  # the close jumps to 200 in the last ten minutes
+    shares = np.ones((1, D_CONTEXT, D_SLOTS), np.float32)
+    colors = np.full((1, D_CONTEXT, D_SLOTS, len(COLORS)), 200, np.uint8)
+    img = render_days(*(torch.as_tensor(a, device=DEVICE) for a in (prices, shares, colors))).cpu().numpy()[0]
+    assert img.shape == (4, D_HEIGHT, D_WIDTH) and D_WIDTH == 3 * D_DAYS
+    grey = img[0, :D_PRICE_ROWS]
+    assert grey[0, 2] == 255 and grey[0, D_WIDTH - 3:].max() == 0  # past days close at the top; the decision day not
+    w = DayWindows(prices[0], shares[0], colors[0], np.arange(D_CONTEXT)[None, :], np.zeros(D_CONTEXT, bool), [0],
+                   [D_CONTEXT - 1], DEVICE)
+    assert (w.draw(torch.tensor([0], device=DEVICE)).cpu().numpy()[0] == img).all()
