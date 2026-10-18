@@ -85,8 +85,9 @@ def _(mo):
     PROJECT = "daily-stock-returns-v5"
     SWEEP_SUFFIX = "-quarterly-v5"  # the sweeps whose chosen runs are rerun: linear-quarterly-v5, ...
     MODELS = ("linear", "mlp", "lgbm")
-    # each sweep's chosen run: one in the middle of its best region, not necessarily its single best score (section 2)
-    RUNS = {"linear": "driven-sweep-41", "mlp": "efficient-sweep-39", "lgbm": "winter-sweep-17"}
+    # the MLP's and LightGBM's: their sweep's highest out-of-sample rank IC on the >= $1B stocks (oos_1b/ic_mean);
+    # the elastic net's: the region choice by MSE, which backtested better than its highest rank IC (section 2)
+    RUNS = {"linear": "driven-sweep-41", "mlp": "major-sweep-29", "lgbm": "winter-sweep-17"}
     FIRST = "2019-01-01"
     HOLD_OUT_MONTHS = 12  # LightGBM's and the MLP's early-stopping hold-out, as in the sweeps
     SEEDS = 5  # LightGBM and the MLP average seeds 0-4, as in 03's comparison
@@ -114,10 +115,10 @@ def _(mo):
     mo.md(r"""
     ## 2. Each sweep's chosen run
 
-    The run named in `RUNS` from each `<model>-quarterly-v5` sweep, shown with its rank by the metric the sweep optimized (the lowest out-of-sample MSE on the ≥ $1B stocks) and the sweep's best run.
+    The run named in `RUNS` from each `<model>-quarterly-v5` sweep, shown with its rank by the metric the sweep optimized (the lowest out-of-sample MSE on the ≥ $1B stocks) and the sweep's best run by that metric.
 
-    - **Why not simply the best:** within each sweep's best group, runs can't be told apart by their quarterly MSE, so the single best score is mostly noise.
-    - **So the chosen run sits in the best region,** where nearby settings score about as well, away from the edges of the search and from the tree and epoch caps; it can be the best run itself (`explanations/models/walkforward.md`).
+    - **The MLP's and LightGBM's chosen run is the sweep's highest out-of-sample rank IC on the ≥ $1B stocks** (`oos_1b/ic_mean`; user decision, 2026-10-17). Until then each sweep's chosen run sat in the middle of its best region by MSE (`explanations/models/walkforward.md`); those results are in `data/walkforward/previous_choice/`.
+    - **The elastic net keeps its region choice,** Ridge with α = 0.3 (user decision, 2026-10-17): its highest rank IC, α = 30 at the top of the grid, had the higher IC in the walk-forward (0.0150 against 0.0131) but the weaker decile long-short (Sharpe 0.96 against 1.10). Its results are in `data/walkforward/rank_ic_choice/linear/`.
     - **LightGBM and the MLP average 5 seeds** instead of the sweep run's one.
     - **The settings a walk-forward used are written with its results.**
     """)
