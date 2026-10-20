@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Walk-forward with the tuned settings: monthly refits, coefficients, SHAP and SAGE
 
-    Reruns each model family's chosen run from the v5 W&B sweeps (`scripts/models/03_train_wandb_linear_trees_nn.py`) over 2019-2023, refitting every month instead of every quarter, since nothing is tuned here, and records what each model learned at every refit. The plan is in `explanations/models/walkforward.md`.
+    Reruns each model family's chosen run from the v5 W&B sweeps (`scripts/models/03_train_wandb_linear_trees_nn.py`) over 2019-2023, refitting every month instead of every quarter, since nothing is tuned here, and records what each model learned at every refit. The plan is in `explanations/models/models.md`.
 
     - **The elastic net:** its coefficients and their t-statistics.
     - **LightGBM and the MLP:** SHAP values (what each feature adds to a prediction) and SAGE values (what each feature adds to the out-of-sample fit).
@@ -117,7 +117,7 @@ def _(mo):
 
     The run named in `RUNS` from each `<model>-quarterly-v5` sweep, shown with its rank by the metric the sweep optimized (the lowest out-of-sample MSE on the ≥ $1B stocks) and the sweep's best run by that metric.
 
-    - **The MLP's and LightGBM's chosen run is the sweep's highest out-of-sample rank IC on the ≥ $1B stocks** (`oos_1b/ic_mean`; user decision, 2026-10-17). Until then each sweep's chosen run sat in the middle of its best region by MSE (`explanations/models/walkforward.md`); those results are in `data/walkforward/previous_choice/`.
+    - **The MLP's and LightGBM's chosen run is the sweep's highest out-of-sample rank IC on the ≥ $1B stocks** (`oos_1b/ic_mean`; user decision, 2026-10-17). Until then each sweep's chosen run sat in the middle of its best region by MSE (`explanations/models/models.md`); those results are in `data/walkforward/previous_choice/`.
     - **The elastic net keeps its region choice,** Ridge with α = 0.3 (user decision, 2026-10-17): its highest rank IC, α = 30 at the top of the grid, had the higher IC in the walk-forward (0.0150 against 0.0131) but the weaker decile long-short (Sharpe 0.96 against 1.10). Its results are in `data/walkforward/rank_ic_choice/linear/`.
     - **LightGBM and the MLP average 5 seeds** instead of the sweep run's one.
     - **The settings a walk-forward used are written with its results.**
@@ -222,10 +222,12 @@ def _(
         return shap, np.abs(shap).mean(axis=0), slope
 
 
-    def walk_forward(kind, chosen, out, months=None):
-        """Refit every month with the chosen run's settings, predict and score the month, explain the refit, and write
-        it all to `out`. `months` keeps only the first months, as a quick check."""
-        cfg = {**chosen["settings"], **({"seeds": SEEDS} if kind != "linear" else {})}
+    def walk_forward(kind, chosen, out, months=None, every="month", refit=False):
+        """Refit every month (or every year, `every`) with the chosen run's settings, predict and score the period,
+        explain the refit, and write it all to `out`. `months` keeps only the first periods, as a quick check. With
+        `refit` (LightGBM), each fit is redone on the training rows and the hold-out with the early-stopped tree count."""
+        cfg = {**chosen["settings"], **({"seeds": SEEDS} if kind != "linear" else {}),
+               **({"refit_with_holdout": True} if refit else {})}
         target = cfg["target"]
         a = arrays(cfg["bjzz"], target)
         x, y, day, large, features = a["x"], a["y"], a["day"], a["large"], a["features"]
@@ -234,7 +236,7 @@ def _(
             {**chosen, "settings": cfg, "shap_rows": SHAP_ROWS, "sage_permutations": SAGE_PERMUTATIONS,
              "background_rows": BACKGROUND_ROWS}, indent=2))
         predictions, per_fold, betas, shap_folds, shap_rows, sage_days = [], [], [], [], [], []
-        for i, fold in enumerate(folds(np.unique(day), first=FIRST, every="month")[:months]):
+        for i, fold in enumerate(folds(np.unique(day), first=FIRST, every=every)[:months]):
             start = time.perf_counter()
             fit_rows, hold, rows = fold_rows(day, y, large, fold, HOLD_OUT_MONTHS, holds_out=kind != "linear",
                                              train_rows=cfg.get("train_rows", "all"))
@@ -309,13 +311,22 @@ def _(MODELS, OUT, Path, RUNS, argparse, mo, subprocess, sweep_run, sys, walk_fo
         r.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
         r.add_argument("--months", type=int, help="only the first N months, as a quick check")
         r.add_argument("--out", type=Path, default=OUT, help="where to write the results, one folder per model")
+        r.add_argument("--every", choices=["month", "year"], default="month",
+                       help="refit every month (default) or every year, as the CNNs; yearly results go to <model>_yearly")
+        r.add_argument("--refit", action="store_true",
+                       help="LightGBM only: fit again on the training rows and the hold-out with the early-stopped tree "
+                            "count; results go to <model>[_yearly]_refit")
         args = parser.parse_args(argv)
+        if args.refit and args.models != ["lgbm"]:
+            raise SystemExit("--refit is for LightGBM only: run it with --models lgbm")
         if len(args.models) > 1:
             # one process per model: PyTorch on the CPU after LightGBM in one process deadlocks or crashes on macOS (two
             # OpenMP runtimes), and each process frees its memory when its model is done
             for kind in args.models:
                 subprocess.run([sys.executable, sys.argv[0], "run", "--models", kind, "--out", str(args.out),
-                                *(["--months", str(args.months)] if args.months else [])], check=True)
+                                "--every", args.every, *(["--refit"] if args.refit else []),
+                                *(["--months", str(args.months)] if args.months else [])],
+                               check=True)
             return
         kind = args.models[0]
         chosen = sweep_run(kind)
@@ -323,7 +334,8 @@ def _(MODELS, OUT, Path, RUNS, argparse, mo, subprocess, sweep_run, sys, walk_fo
             raise SystemExit(f"{kind}: its sweep has no finished run named {RUNS[kind]}")
         print(f"{kind}: {chosen['run']} ({chosen['metric']} {chosen['value']:.6g}, rank {chosen['rank']} of "
               f"{chosen['finished_runs']}; best {chosen['best_run']} {chosen['best_value']:.6g})", flush=True)
-        walk_forward(kind, chosen, args.out / kind, months=args.months)
+        name = kind + ("_yearly" if args.every == "year" else "") + ("_refit" if args.refit else "")
+        walk_forward(kind, chosen, args.out / name, months=args.months, every=args.every, refit=args.refit)
 
 
     if mo.app_meta().mode == "script" and len(sys.argv) > 1:  # run as a script with a command

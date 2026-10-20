@@ -44,6 +44,20 @@ def test_lightgbm_averages_seeds_and_seed_0_alone_is_reproducible():
     assert np.corrcoef(three, y[3500:])[0, 1] > 0.9 and info["trees"] > 0
 
 
+def test_lightgbm_refit_with_the_holdout_keeps_the_early_stopped_tree_count_and_learns_the_holdout():
+    x, y = _data()
+    params = {"learning_rate": 0.1, "num_leaves": 15, "min_data_in_leaf": 20, "feature_fraction": 1.0,
+              "bagging_fraction": 1.0, "lambda_l2": 0.0, "linear_tree": False, "max_trees": 300}
+    args = (x[:3000], y[:3000], x[3000:3500], y[3000:3500])
+    plain = fit("lgbm", params, *args)
+    refit = fit("lgbm", {**params, "refit_with_holdout": True}, *args)
+    assert refit.info["trees"] == plain.info["trees"]
+    # fit on the hold-out too, the refit model is closer to the hold-out's targets
+    err = lambda m: np.mean((m.predict(x[3000:3500]) - y[3000:3500]) ** 2)
+    assert err(refit) < err(plain)
+    assert np.corrcoef(refit.predict(x[3500:]), y[3500:])[0, 1] > 0.9
+
+
 def test_mlp_averages_seeds_and_stops_early_on_cpu():
     x, y = _data()
     params = {"layers": 1, "width": 16, "dropout": 0.0, "learning_rate": 1e-2, "weight_decay": 0.0,

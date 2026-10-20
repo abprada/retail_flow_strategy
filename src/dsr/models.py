@@ -71,7 +71,8 @@ def _linear(p, x, y, xv, yv):
 def _lgbm(p, x, y, xv, yv):
     """Gradient-boosted trees, squared error, up to max_trees, stopped early on the hold-out. Row and feature
     sampling make a fit depend on its seed, so predictions are averaged over `seeds` fits (seeds 0, 1, ...; seed 0
-    alone is a sweep run's model)."""
+    alone is a sweep run's model). With `refit_with_holdout`, each seed is then fit again on the training rows and the
+    hold-out together, with the number of trees early stopping chose, so the model also learns the hold-out."""
     params = {
         "objective": "regression", "metric": "l2", "verbosity": -1, "num_threads": THREADS,
         "learning_rate": p["learning_rate"], "num_leaves": int(p["num_leaves"]),
@@ -86,9 +87,14 @@ def _lgbm(p, x, y, xv, yv):
         valid = lgb.Dataset(xv, yv, reference=train)
         booster = lgb.train({**params, "seed": seed}, train, num_boost_round=int(p.get("max_trees", 2000)),
                             valid_sets=[valid], callbacks=[lgb.early_stopping(EARLY_STOP_TREES, verbose=False)])
-        boosters.append(booster.free_dataset())  # predicting doesn't need the binned training rows
-    return Fitted(lambda xp: np.mean([b.predict(xp, num_iteration=b.best_iteration) for b in boosters], axis=0),
-                  {"trees": float(np.mean([b.best_iteration for b in boosters]))})
+        trees = max(int(booster.best_iteration), 1)
+        if p.get("refit_with_holdout", False):
+            both = lgb.Dataset(np.concatenate([np.asarray(x), np.asarray(xv)]), np.concatenate([np.asarray(y), np.asarray(yv)]),
+                               free_raw_data=True)
+            booster = lgb.train({**params, "seed": seed}, both, num_boost_round=trees)
+        boosters.append((booster.free_dataset(), trees))  # predicting doesn't need the binned training rows
+    return Fitted(lambda xp: np.mean([b.predict(xp, num_iteration=n) for b, n in boosters], axis=0),
+                  {"trees": float(np.mean([n for _, n in boosters]))})
 
 
 def _network(p, n_in):
