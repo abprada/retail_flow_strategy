@@ -1,4 +1,4 @@
-"""Run the TAQ pull on WRDS Cloud for a list of days (explanations/taq/taq_pull.md, explanations/taq/wrds_cloud.md).
+"""Run the TAQ pull on WRDS Cloud for a list of days (explanations/taq/pull.md).
 
 On WRDS Cloud, in a folder holding this script, days.csv and the package folder dsr/ (taq.py, taq_sql.py):
 

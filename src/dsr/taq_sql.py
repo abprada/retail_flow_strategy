@@ -1,4 +1,4 @@
-"""The TAQ pull's per-day SQL (explanations/taq/taq_pull.md), generated for DuckDB (local development) or Postgres (WRDS).
+"""The TAQ pull's per-day SQL (explanations/taq/pull.md), generated for DuckDB (local development) or Postgres (WRDS).
 
 One template, two dialects. The few differences are switches here: the source tables and their column types,
 integer division, regular expressions and time arithmetic. Integer division is only ever applied to positive numbers,
@@ -18,7 +18,7 @@ TEN_MINUTES_NS = 600 * 10**9
 
 @dataclass(frozen=True)
 class Day:
-    """A WCT day's parameters (taq_pull.md section 2), times in nanoseconds after midnight."""
+    """A WCT day's parameters (pull.md, parameters of a day), times in nanoseconds after midnight."""
 
     ymd: str  # YYYYMMDD
     open_ns: int

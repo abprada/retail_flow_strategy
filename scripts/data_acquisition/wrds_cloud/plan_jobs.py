@@ -3,7 +3,7 @@
     uv run python scripts/data_acquisition/wrds_cloud/plan_jobs.py [--jobs 5] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
                                                   [--days-file days.txt --first-job 6] [--prices]
 
-WRDS Cloud allows a user 10 batch slots and 150 GB of memory at once (explanations/taq/wrds_cloud.md); a job takes 2
+WRDS Cloud allows a user 10 batch slots and 150 GB of memory at once (explanations/taq/pull.md, running on WRDS Cloud); a job takes 2
 slots, so 5 jobs of 30 GB (m_mem_free is per slot: 15 GB x 2) use both limits fully. Days are weighted by the size of
 their raw trades (the typical day of their year, from the coverage check and the pilot), so each job gets about the
 same amount of work, not the same number of days. Within every job the days run in order of priority, so the most

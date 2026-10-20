@@ -1,6 +1,6 @@
 """Raw fields -> one signal value per stock per day.
 
-Every feature is transformed within each day (explanations/features/features_nn_linear_tree.md): winsorized at the
+Every feature is transformed within each day (explanations/models/features.md): winsorized at the
 day's 1st and 99th percentiles, then standardized to mean 0 and standard deviation 1; missing values become 0, the day's
 centre.
 """

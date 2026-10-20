@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # The CNN's drawing data
 
-    For every large-cap stock-day of the training days (`cap_prev` at least `LARGE_CAP`, 2014-2023), what its chart image draws: where each bar's open, high, low, close and volume fall, and its six color values (`explanations/CNN/features.md`). The images themselves are drawn from it on the GPU as the CNN trains (`dsr.cnn.render`), so no image is stored and the drawing can change without a rebuild.
+    For every large-cap stock-day of the training days (`cap_prev` at least `LARGE_CAP`, 2014-2023), what its chart image draws: where each bar's open, high, low, close and volume fall, and its six color values (`explanations/CNN/cnn.md`). The images themselves are drawn from it on the GPU as the CNN trains (`dsr.cnn.render`), so no image is stored and the drawing can change without a rebuild.
 
     - **40 bars a stock-day:** the previous trading day's last ten minutes, the night (its evening and today's pre-open), then the session's 38 ten-minute bars (20 on early closes, the rest left empty), 3 pixels each: 4 × 64 × 120 images. The two bars before the session are those of the last section of `notebooks/CNN/test_image.py`.
     - **Prices:** round-lot (`px_` in `prices.parquet`) for the session and the last ten minutes; the night spans the last ten minutes' close to the last trade before 09:30. The scale runs from the stock-day's highest high to its lowest low.

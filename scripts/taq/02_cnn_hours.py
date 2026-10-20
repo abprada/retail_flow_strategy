@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # The multi-day CNN's hourly data
 
-    For every stock-day of the training days in the panel (2014-2023), its hourly bars, from which the CNN's 21-day images are drawn on the GPU as it trains (`dsr.cnn.HourWindows`; `explanations/CNN/multiday_design.md`). Every stock in the panel, not only the large caps: a stock of $1B or more today may have been smaller three weeks ago, and its image still shows those days.
+    For every stock-day of the training days in the panel (2014-2023), its hourly bars, from which the CNN's 21-day images are drawn on the GPU as it trains (`dsr.cnn.HourWindows`; `explanations/CNN/cnn.md`, multi-day images). Every stock in the panel, not only the large caps: a stock of $1B or more today may have been smaller three weeks ago, and its image still shows those days.
 
     **Nine stored slots a stock-day** (`dsr.cnn.hour_table`), each with its round-lot open, high, low and close, its shares (every trade) and its six color pixels:
 

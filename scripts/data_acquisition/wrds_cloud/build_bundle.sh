@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the WRDS Cloud bundle (explanations/taq/wrds_cloud.md): the job script, the trading days, the job scripts made
+# Build the WRDS Cloud bundle (explanations/taq/pull.md, running on WRDS Cloud): the job script, the trading days, the job scripts made
 # by plan_jobs.py, and the query and checks from src/dsr. Run from the repository: bash scripts/data_acquisition/wrds_cloud/build_bundle.sh
 set -euo pipefail
 B=data/wrds_cloud/bundle

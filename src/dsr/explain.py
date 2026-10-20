@@ -1,4 +1,4 @@
-"""What the models learned (explanations/models/walkforward.md): the linear model's coefficients with standard errors
+"""What the models learned (explanations/models/models.md): the linear model's coefficients with standard errors
 clustered by day, and, for any model, SHAP values of its predictions (shap) and SAGE values of its squared error
 (sage-importance)."""
 

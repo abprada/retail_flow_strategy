@@ -1,4 +1,4 @@
-"""TAQ symbols to CRSP PERMNOs, by date (explanations/taq/taq_pull.md, section 11).
+"""TAQ symbols to CRSP PERMNOs, by date (explanations/taq/cleaning.md, symbols to PERMNOs).
 
 A TAQ symbol is never matched by ticker. On each day the symbol's CUSIP comes from that day's master file: under the
 symbol itself or, failing that, written without its space (until October 2016 the master writes Nasdaq class shares

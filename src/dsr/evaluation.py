@@ -1,4 +1,4 @@
-"""Signal evaluation (explanations/features/features_nn_linear_tree.md, validation measures): daily rank IC, its
+"""Signal evaluation (explanations/models/features.md, validation measures): daily rank IC, its
 summary, R² against zero, mean squared error, and the average return by prediction decile; `measures` and
 `summarize` put them together for a set of scored predictions. Callers pass the stocks scored (>= $1B)."""
 

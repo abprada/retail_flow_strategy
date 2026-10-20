@@ -52,7 +52,7 @@ def _(mo):
     mo.md(r"""
     ## WRDS Consolidated Trades (`wct`)
 
-    Every trade with the NBBO prevailing just before it, built by WRDS. It replaces the trade (`ctm`) and NBBO (`complete_nbbo`) tables; see `explanations/taq/wct.md`.
+    Every trade with the NBBO prevailing just before it, built by WRDS. It replaces the trade (`ctm`) and NBBO (`complete_nbbo`) tables; see `explanations/taq/tables.md` (WCT).
     """)
     return
 
@@ -218,7 +218,7 @@ def _(mo):
     mo.md(r"""
     # Cleaning one day
 
-    The rules in `explanations/taq/cleaning_spec.md`, one section per step. Each step keeps a table of trades and adds a row to the counts: trades, dollars and off-exchange trades left after it. The checks at the end stop the notebook if any fails.
+    The rules in `explanations/taq/pull.md` (trade cleaning), one section per step. Each step keeps a table of trades and adds a row to the counts: trades, dollars and off-exchange trades left after it. The checks at the end stop the notebook if any fails.
 
     ## Load
 
@@ -349,7 +349,7 @@ def _(mo):
 
     Symbol → CUSIP from that day's master file → PERMNO from the CRSP name record valid that day, on the first 8 CUSIP characters. A CUSIP valid for two PERMNOs that day is left unmatched. No trade is dropped here: symbols without a CUSIP (test symbols) or without a PERMNO (ETNs, preferreds, warrants, units, structured products, ADRs that CRSP lacks) are kept, as in the full pull, which writes every traded symbol and matches identifiers locally.
 
-    The master file also gives each stock's Tick Size Pilot group (October 2016 to September 2018), kept on every trade: stocks in groups G2 and G3 are not dropped, since their prices and volume are fine and their retail trades can be found from half-cent prices away from the midpoint (`explanations/taq/taq_features.md`). An unknown group code stops the notebook.
+    The master file also gives each stock's Tick Size Pilot group (October 2016 to September 2018), kept on every trade: stocks in groups G2 and G3 are not dropped, since their prices and volume are fine and their retail trades can be found from half-cent prices away from the midpoint (`explanations/models/features.md`). An unknown group code stops the notebook.
     """)
     return
 
@@ -398,7 +398,7 @@ def _(mo):
 
     The auctions are not retail flow: retail orders fill off-exchange, after 09:30 for orders placed overnight. The opening price for the overnight return comes from CRSP (`dlyopen`), as does the previous close.
 
-    Buckets on a normal day, by `t_ns`, covering all 24 hours (the bucket codes of `explanations/taq/taq_pull.md`):
+    Buckets on a normal day, by `t_ns`, covering all 24 hours (the bucket codes of `explanations/taq/pull.md`, buckets and bars):
     - **`overnight_morning`** (0) [00:00, 09:30), normal or extended, feeds this day;
     - **`regular`** (1) [09:30, 15:50), normal, feeds this day;
     - **`last`** (2) [15:50, 16:00), normal, feeds the next trading day;
@@ -470,7 +470,7 @@ def _(mo):
     - **`quote_state`:** `missing` if the bid or offer is empty or not above 0, `crossed` if bid > offer, `locked` if bid = offer, else `valid`. Midpoint signing needs `valid`.
     - **`large`:** $100,000 or more.
 
-    No trade is dropped or flagged for its price's distance from the quote: most prints far outside it are sweeps through several price levels or off-exchange trades reported after the quote moved (`explanations/taq/taq_features.md`).
+    No trade is dropped or flagged for its price's distance from the quote: most prints far outside it are sweeps through several price levels or off-exchange trades reported after the quote moved (`explanations/models/features.md`).
 
     ## Checks
 

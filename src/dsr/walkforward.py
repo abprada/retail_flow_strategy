@@ -1,4 +1,4 @@
-"""The walk-forward folds (explanations/models/training.md): an expanding window from the first day, refit every year,
+"""The walk-forward folds (explanations/models/models.md): an expanding window from the first day, refit every year,
 quarter (the sweeps) or month (the walk-forward with the chosen settings), predicting the next period out of
 sample."""
 

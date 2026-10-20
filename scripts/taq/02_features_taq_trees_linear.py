@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # The model panel
 
-    Builds the panels the ML script reads from the clean TAQ data (`scripts/taq/01_clean_and_explore_TAQ.py`, section 5): one row per stock and decision day, built up in steps: (1) the keys, (2) the targets, (3) family A of the features, (4) family B, (5) family C, (6) family D; then (7) joined, with each feature winsorized at the day's 1st and 99th percentiles and standardized within the day (except the 0/1 flags; `dsr.features.winsorize_standardize`); (8) screened for near-copies; (9) saved to `data/processed/`. The plan is in `explanations/features/features_nn_linear_tree.md`.
+    Builds the panels the ML script reads from the clean TAQ data (`scripts/taq/01_clean_and_explore_TAQ.py`, section 5): one row per stock and decision day, built up in steps: (1) the keys, (2) the targets, (3) family A of the features, (4) family B, (5) family C, (6) family D; then (7) joined, with each feature winsorized at the day's 1st and 99th percentiles and standardized within the day (except the 0/1 flags; `dsr.features.winsorize_standardize`); (8) screened for near-copies; (9) saved to `data/processed/`. The plan is in `explanations/models/features.md`.
 
     **Input:** `data/intermediate/taq/panel_train.parquet` and `panel_test.parquet` (one row per day and stock in the universe, with what is known before the cutoff and the target `ret_next`), the day folders' session `bars`, and CRSP daily for past returns.
 

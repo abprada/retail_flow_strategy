@@ -1,8 +1,8 @@
-"""The TAQ pull's tables: bin codes and the conservation checks run on every pulled day (explanations/taq/taq_pull.md).
+"""The TAQ pull's tables: bin codes and the conservation checks run on every pulled day (explanations/taq/pull.md).
 
 A day's four tables: `daily` (symbol, spread_bp), `cells` (symbol, bucket, venue, z, q, spread, size; trades, shares,
 dollars), `bars` (symbol, bucket, bar; prices, counts and sums) and `audit` (section, item, venue, kept; trades, shares,
-dollars). Codes are those of taq_pull.md section 6.
+dollars). Codes are those of pull.md, bin codes.
 """
 
 import pandas as pd
@@ -32,7 +32,7 @@ def _equal(a: pd.DataFrame, b: pd.DataFrame, what: str) -> tuple[str, bool, str]
 
 def check_day(daily: pd.DataFrame, cells: pd.DataFrame, bars: pd.DataFrame, audit: pd.DataFrame,
               regular_bars: int) -> pd.DataFrame:
-    """The conservation checks of taq_pull.md section 7 for one pulled day; regular_bars is 38, or 20 on an early close.
+    """The conservation checks of pull.md (validation) for one pulled day; regular_bars is 38, or 20 on an early close.
 
     Returns one row per check: check, passed, detail.
     """
@@ -151,7 +151,7 @@ FLOAT_TOLERANCE = 1e-6
 
 
 def compare_tables(name: str, reference: pd.DataFrame, other: pd.DataFrame) -> pd.DataFrame:
-    """Row-by-row comparison of one pulled table with the reference (the golden test, taq_pull.md section 8).
+    """Row-by-row comparison of one pulled table with the reference (the golden test, pull.md, validation).
 
     Keys must be the same set; integer columns equal; columns named *dollars within a cent; prices, midpoints and
     spreads within FLOAT_TOLERANCE. Returns one row per column: column, rows_differing, detail.

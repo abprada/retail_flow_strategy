@@ -1,4 +1,4 @@
-"""Long-short backtest of a model's predictions, before costs (explanations/models/backtest.md). Each day the stocks are
+"""Long-short backtest of a model's predictions, before costs (explanations/models/models.md). Each day the stocks are
 ranked by prediction and cut into equal buckets, as `evaluation` cuts deciles; the portfolio buys the top bucket and
 sells the bottom one short, equal-weighted with $1 a side, at the close, and holds them to the next close (`ret_next`).
 Callers pass the stocks traded (>= $1B)."""

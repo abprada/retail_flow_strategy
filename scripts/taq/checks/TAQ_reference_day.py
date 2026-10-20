@@ -3,7 +3,7 @@
     uv run python scripts/taq/checks/TAQ_reference_day.py
 
 Runs the one-day cleaning notebook (scripts/taq/01_clean_and_explore_TAQ_raw_trades.py) headless, about 5 minutes, then builds
-`daily`, `cells`, `bars` and `audit` from its trades exactly as explanations/taq/taq_pull.md (sections 4 to 6) defines them,
+`daily`, `cells`, `bars` and `audit` from its trades exactly as explanations/taq/pull.md (trade cleaning, buckets and bars, bin codes, output tables) defines them,
 and runs the conservation checks of section 7 on them. All bin arithmetic is in whole numbers: prices in millionths of a
 dollar, so trades exactly on a bin edge (Z = 0.4 or 0.6) land where the spec says.
 
@@ -40,7 +40,7 @@ def micro(x) -> np.ndarray:
 
 
 def codes(t: pd.DataFrame, open_ns: int) -> dict[str, np.ndarray]:
-    """Every trade's integer prices, quote state, bins (taq_pull.md 6.1 and 6.3), bucket and bar."""
+    """Every trade's integer prices, quote state, bins (pull.md, bin codes), bucket and bar."""
     P, size = micro(t["price"]), t["size"].to_numpy().astype(np.int64)
     bid, ask = t["nbb"].to_numpy(dtype=float), t["nbo"].to_numpy(dtype=float)
     have = ~np.isnan(bid) & ~np.isnan(ask) & (bid > 0) & (ask > 0)
@@ -151,7 +151,7 @@ def build_bars(sym_code: np.ndarray, sym_names: np.ndarray, price: np.ndarray, c
 
 
 def build_audit(defs: dict, kept_mask_all: np.ndarray) -> pd.DataFrame:
-    """What each cleaning step removed (taq_pull.md 6.5), from the notebook's intermediate tables."""
+    """What each cleaning step removed (pull.md, output tables: audit), from the notebook's intermediate tables."""
     key = ["sym_root", "sym_suffix", "ex", "tr_seqnum", "t_ns"]
     raw, corr, pairs = defs["c0_trades"], defs["c1_corrections"], defs["c1_pairs"]
     venue = lambda df: df["ex"].eq("D").astype(int)

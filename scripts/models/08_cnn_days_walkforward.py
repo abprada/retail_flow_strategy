@@ -12,7 +12,7 @@ def _(mo):
     Jiang, Kelly and Xiu's 20-day image (64 × 60): 20 trading days of daily bars up to the decision day's cutoff (each past day to its close, the decision day to 15:50), a 20-day moving average, volume, and the six retail colors per day, drawn on the GPU from `data/processed/cnn_days_train.npz` (`scripts/taq/02_cnn_days.py`). Refit every year over 2019-2023 and scored like the tabular models and the other CNNs (`06_cnn_walkforward.py`, the one-day images; `07_cnn_hours_walkforward.py`, the 21-day hourly images).
 
     - **Rows:** every large-cap stock-day (`cap_prev` at least $1B) with a model-panel row; it trains on all of them with a target and predicts all of them.
-    - **As Jiang, Kelly and Xiu:** early stopping on the hold-out's squared error (the training window's last 12 months), patience 2 epochs, at most 10. One seed, as the other CNN runs (about 6,400 images a second: 6 to 11 minutes an epoch from the 2019 fold to the 2023 one, about 4 hours in all). The network of `architecture.md` (32, 64 and 128 filters; their 20-day model has 64, 128 and 256), AdamW with learning rate 1e-4 and weight decay 0.05, batches of 1,024.
+    - **As Jiang, Kelly and Xiu:** early stopping on the hold-out's squared error (the training window's last 12 months), patience 2 epochs, at most 10. One seed, as the other CNN runs (about 6,400 images a second: 6 to 11 minutes an epoch from the 2019 fold to the 2023 one, about 4 hours in all). The network of `explanations/CNN/cnn.md` (32, 64 and 128 filters; their 20-day model has 64, 128 and 256), AdamW with learning rate 1e-4 and weight decay 0.05, batches of 1,024.
 
     **The test years (2024-2025) are not read.**
     """)

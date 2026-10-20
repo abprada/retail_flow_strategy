@@ -1,4 +1,4 @@
-"""The model panel's pieces (explanations/features/features_nn_linear_tree.md), built the same way for train and test.
+"""The model panel's pieces (explanations/models/features.md), built the same way for train and test.
 
 Each function works on one period's `panel_train` or `panel_test` (one row per decision day and PERMNO, with what is
 known before the cutoff and the target `ret_next`) and returns columns aligned with its rows, except crsp_windows, which

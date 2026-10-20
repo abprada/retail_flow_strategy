@@ -11,7 +11,7 @@ def _(mo):
 
     ## 0. Table heads
 
-    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/raw/taq/pull/20190604/`, the WRDS pull as downloaded, defined in `explanations/taq/taq_pull.md`), and that day's master file (`data/raw/taq/master/`).
+    **Purpose:** see what each table holds before using it: the first rows of the four tables the pull wrote for one WCT day, 2019-06-04 (`data/raw/taq/pull/20190604/`, the WRDS pull as downloaded, defined in `explanations/taq/pull.md`), and that day's master file (`data/raw/taq/master/`).
 
     **What to look at:** the keys (`symbol`, `bucket`, `bar`, the `cells` codes), the units (prices in dollars, `last_trade_time` in nanoseconds after midnight) and the size of each table.
     """)
@@ -244,7 +244,7 @@ def _(mo):
 
     1. **Nothing is lost silently:** raw trades minus each removal step equal the kept trades, every day and venue (the cell stops otherwise). Yes: 166.8 billion raw trades, 161.2 billion (96.6%) kept.
     2. **How much each step removes, and whether that changes over time** (plot): sale conditions remove about 1% of off-exchange trades in 2014 and 3 to 4% in 2022, mostly derivatively priced odd lots, which the whitelist exists to exclude; prices under $1 about 1 to 2%; cancellations a tiny share. In November 2021 late-reported odd lots double the off-exchange exclusions, which will show as a dip in retail counts.
-    3. **Every correction pairs with its record** (table): `unpaired` is 0 except on 2015-02-11, whose 28,148 corrections have records on another venue (left as printed, see `explanations/taq/taq_pull.md`, section 10). `record_after_cutoff` counts corrections ignored because they were published after 15:50.
+    3. **Every correction pairs with its record** (table): `unpaired` is 0 except on 2015-02-11, whose 28,148 corrections have records on another venue (left as printed, see `explanations/taq/pull.md`, known limitations). `record_after_cutoff` counts corrections ignored because they were published after 15:50.
 
     Codes: `step` items are `raw`, the removals (`records`, `cancelled_or_erroneous`, `sale_condition`, `price_or_size`), `kept` and `restored_original` (corrected trades given back their original print). `ctm` items are the correction codes (`01` corrected, `07` erroneous, `08` cancelled; their records `12`, `11`, `10`), `unmatched` (not found in `wct`), `record_after_cutoff` and `unpaired`.
     """)
@@ -848,7 +848,7 @@ def _(mo):
 
     **Marked on every plot:** the Tick Size Pilot (2016-10 to 2018-09, shaded), zero commissions (2019-10-07), COVID (2020-03), fractional shares printing as one-share trades (2021-02-16) and the meme surge (late January 2021).
 
-    **Columns** (meanings in `explanations/taq/pulled_data_full.md`): `bjzz_*` retail trades by the sub-penny rule, `mid_*` by the midpoint rule, `off_*` all off-exchange, `qr_*` the quote rule on every venue and `exch_qr_*` on exchanges only, `both_signed` and `same_sign` how often the two retail rules sign the same trade and agree.
+    **Columns** (meanings in `explanations/taq/pull.md`, output tables): `bjzz_*` retail trades by the sub-penny rule, `mid_*` by the midpoint rule, `off_*` all off-exchange, `qr_*` the quote rule on every venue and `exch_qr_*` on exchanges only, `both_signed` and `same_sign` how often the two retail rules sign the same trade and agree.
     """)
     return
 

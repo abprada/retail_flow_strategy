@@ -1,5 +1,5 @@
 #!/bin/bash
-# The pilot of the TAQ pull (explanations/taq/taq_pull.md, section 8): ten days chosen to break the query, as one SGE job.
+# The pilot of the TAQ pull (explanations/taq/pull.md, validation): ten days chosen to break the query, as one SGE job.
 #   mkdir -p /scratch/mit/$USER/taq_logs && cd ~/taq && qsub pilot.sh   (qsub ~/taq/pilot.sh fails: WRDS doubles the path)
 #   qstat                                          # is it running?
 #   tail -f /scratch/mit/$USER/taq_logs/taq_pilot.*.log

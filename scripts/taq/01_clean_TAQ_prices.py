@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Round-lot prices by decision day
 
-    **Purpose:** put the price-only pull (`data/raw/taq/prices/<YYYYMMDD>/prices.parquet`, explanations/taq/taq_pull.md section 6.4b) next to each decision day's bars, as `data/intermediate/taq/train|test/<YYYYMMDD>/prices.parquet`. The chart images draw prices from it; volume and the retail columns stay in `bars`. Nothing already written changes.
+    **Purpose:** put the price-only pull (`data/raw/taq/prices/<YYYYMMDD>/prices.parquet`, explanations/taq/pull.md, price-only pull) next to each decision day's bars, as `data/intermediate/taq/train|test/<YYYYMMDD>/prices.parquet`. The chart images draw prices from it; volume and the retail columns stay in `bars`. Nothing already written changes.
 
     **What a decision day gets:** the previous WCT day's last ten minutes (`prev_last10`) and its own session to 15:50 (`session`), for its panel stocks' primary symbols, with the PERMNO each symbol had on the day it traded: the same rows the bars have, by `permno`, `piece` and `bar`. A bar whose trades were all odd lots has no row. Three price sets, each `open`, `high`, `low`, `close` and `trades`:
     - `rl_`: trades not flagged as odd lots, by the round-lot rule of that day;

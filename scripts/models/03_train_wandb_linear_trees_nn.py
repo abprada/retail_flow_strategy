@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Training: elastic net, LightGBM and MLPs, tuned with W&B sweeps
 
-    Trains every model family on the model panel (`data/processed/model_panel_train.parquet`, from `scripts/taq/02_features_taq_trees_linear.py`) with the same walk-forward, features and target, and tunes each with a W&B sweep. The plan is in `explanations/models/training.md`.
+    Trains every model family on the model panel (`data/processed/model_panel_train.parquet`, from `scripts/taq/02_features_taq_trees_linear.py`) with the same walk-forward, features and target, and tunes each with a W&B sweep. The plan is in `explanations/models/models.md`.
 
     **The walk-forward:** quarterly refits over 2019-2023 (20 folds). Each fold trains on every day from 2014 to just before its quarter, on all rows with a target; LightGBM and the MLP hold out the window's last 12 months to stop early. Predictions are scored on the stocks with previous cap of $1B or more only, the trading universe (`large_cap`; v4 was scored on the liquid stocks instead, those with a 20-day median quoted spread of at most 20 bp).
 
@@ -101,7 +101,7 @@ def _(mo):
             "feature_fraction": {"min": 0.3, "max": 1.0},
             "bagging_fraction": {"min": 0.3, "max": 1.0},
             "lambda_l2": {"distribution": "log_uniform_values", "min": 0.01, "max": 1000.0},
-            "linear_tree": {"value": False},  # constant leaves only (explanations/models/training.md)
+            "linear_tree": {"value": False},  # constant leaves only (explanations/models/models.md)
             "max_trees": {"value": 5000},  # learning rates down to 0.003 need more than v4's 2,000
             "seeds": {"value": 1},
         },
@@ -325,7 +325,7 @@ def _(mo):
     uv run python scripts/models/03_train_wandb_linear_trees_nn.py check --project daily-stock-returns-v4 --runs fearless-sweep-27
     ```
 
-    `sweep` creates a W&B sweep for one model family (or joins one), named `<model>-quarterly-v5`, and runs its agent here. `compare` takes each sweep's best run by the metric that sweep optimized (the lowest `oos_1b/mse` for the v5 sweeps), reruns it (LightGBM and the MLP averaging seeds 0-4 instead of the sweep's seed 0), and logs one comparison run, on the ≥ $1B stocks: every model's out-of-sample measures and in-sample IC, R², MSE and spread side by side, and paired tests between every two models, on their daily IC, their daily long-short return and their daily MSE (the mean daily difference and its Newey-West t-statistic). `check` reruns runs of an earlier version's sweeps by name, each twice with everything else as it was: trained on all rows, and on the trading universe only. It logs both, and the same paired tests between them on the universe: what training on the universe alone changes at fixed settings. (It was run on 2026-10-14 for v4's chosen runs, when the universe was the liquid stocks; explanations/models/training.md.) Run without a command, the script only runs its cells.
+    `sweep` creates a W&B sweep for one model family (or joins one), named `<model>-quarterly-v5`, and runs its agent here. `compare` takes each sweep's best run by the metric that sweep optimized (the lowest `oos_1b/mse` for the v5 sweeps), reruns it (LightGBM and the MLP averaging seeds 0-4 instead of the sweep's seed 0), and logs one comparison run, on the ≥ $1B stocks: every model's out-of-sample measures and in-sample IC, R², MSE and spread side by side, and paired tests between every two models, on their daily IC, their daily long-short return and their daily MSE (the mean daily difference and its Newey-West t-statistic). `check` reruns runs of an earlier version's sweeps by name, each twice with everything else as it was: trained on all rows, and on the trading universe only. It logs both, and the same paired tests between them on the universe: what training on the universe alone changes at fixed settings. (It was run on 2026-10-14 for v4's chosen runs, when the universe was the liquid stocks; explanations/models/models.md.) Run without a command, the script only runs its cells.
     """)
     return
 

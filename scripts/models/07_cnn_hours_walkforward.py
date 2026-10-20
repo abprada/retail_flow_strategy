@@ -9,13 +9,13 @@ def _(mo):
     mo.md(r"""
     # Walk-forward of the CNN on 21-day hourly images
 
-    The multi-day CNN of `explanations/CNN/multiday_design.md`: 21 trading days of hourly bars up to the decision day's cutoff, the decision day's night before its first hour, a 35-hour moving average, 4 × 96 × 444 images drawn on the GPU from `data/processed/cnn_hours_train.npz` (`scripts/taq/02_cnn_hours.py`). Refit every year over 2019-2023 and scored like the tabular models and the one-day CNN (`scripts/models/06_cnn_walkforward.py`, whose run of 2019-2021 is in `data/walkforward/cnn_one_day/`).
+    The multi-day CNN of `explanations/CNN/cnn.md` (multi-day images): 21 trading days of hourly bars up to the decision day's cutoff, the decision day's night before its first hour, a 35-hour moving average, 4 × 96 × 444 images drawn on the GPU from `data/processed/cnn_hours_train.npz` (`scripts/taq/02_cnn_hours.py`). Refit every year over 2019-2023 and scored like the tabular models and the one-day CNN (`scripts/models/06_cnn_walkforward.py`, whose run of 2019-2021 is in `data/walkforward/cnn_one_day/`).
 
     - **Rows:** every large-cap stock-day (`cap_prev` at least $1B) with a model-panel row; it predicts all of them.
     - **Training on every 5th day of each stock**, staggered by stock (`(day + permno) % 5 == 0`), so each day holds a fifth of the stocks: images of consecutive days share 20 of their 21 days, so the others add little, and the sample cuts the epoch time by 5. The early-stopping hold-out, the training window's last 12 months, takes the same sample: a year's mean IC is noisy mostly from day to day, not from the number of stocks a day, so its standard error rises only from about 0.0052 to 0.0059, and predicting it takes 1.5 minutes an epoch instead of 7.6.
     - **Early stopping on the hold-out's rank IC** (patience 2 epochs, at most 10), keeping the epoch with the highest: in the one-day run the squared error never beat predicting zero and kept epochs with a lower hold-out IC.
     - **Speed:** about 420 images a second through a training step (the network is the cost: drawing runs at 31,000 a second; half precision adds only about 15%), so about 17 to 34 minutes an epoch from the 2019 fold to the 2023 one.
-    - **The network** of `architecture.md` on the larger image (32, 64 and 128 filters; the 96 rows end as 4 before the head), AdamW with learning rate 1e-4 and weight decay 0.05, batches of 512, one seed.
+    - **The network** of `explanations/CNN/cnn.md` on the larger image (32, 64 and 128 filters; the 96 rows end as 4 before the head), AdamW with learning rate 1e-4 and weight decay 0.05, batches of 512, one seed.
 
     **The test years (2024-2025) are not read.**
     """)

@@ -5,7 +5,7 @@
 The password is read from ~/.pgpass (line `wrds-pgdata.wharton.upenn.edu:9737:wrds:<you>:<password>`, chmod 600),
 from PGPASSWORD, or asked for interactively. WRDS may also send a Duo push.
 
-WCT gives every trade the national best bid and offer standing just before it (explanations/taq/wct.md), checked only
+WCT gives every trade the national best bid and offer standing just before it (explanations/taq/tables.md, WCT), checked only
 on 2019-06-04 (99.89% equal to the last complete_nbbo row strictly before the trade). Barber et al. (2024) write that
 WRDS matches the NBBO in the nanosecond before the trade only since 2017, and wct has no nanosecond fields before 2016.
 If earlier days took the quote at the trade's own timestamp, possibly the quote the trade itself caused, the position of

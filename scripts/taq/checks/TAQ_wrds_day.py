@@ -7,7 +7,7 @@ The password is read from ~/.pgpass (line `wrds-pgdata.wharton.upenn.edu:9737:wr
 from PGPASSWORD, or asked for interactively. WRDS sends one Duo push for the connection, used for every day given.
 
 For each day: reads from information_schema whether that day's wct and ctm have nanoseconds and trade IDs, generates
-the Postgres SQL (src/dsr/taq_sql.py, explanations/taq/taq_pull.md), runs it on WRDS (temporary tables, then one COPY per
+the Postgres SQL (src/dsr/taq_sql.py, explanations/taq/pull.md), runs it on WRDS (temporary tables, then one COPY per
 output table), and saves the four tables, the SQL, the time and size of every statement, and the conservation checks.
 For 2019-06-04 it also compares every table row by row with the Python reference
 (scripts/taq/checks/TAQ_reference_day.py): the golden test passes only if nothing differs.
