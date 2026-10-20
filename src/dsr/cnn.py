@@ -1,4 +1,4 @@
-"""The CNN on chart images (explanations/CNN/features.md, architecture.md, training_plan.md): each large-cap
+"""The CNN on chart images (explanations/CNN/cnn.md; the two-branch model built on it: dsr.two_branch): each large-cap
 stock-day's drawing data (where each bar's prices and volume fall in the image, and its six color values), the images
 drawn from it on the GPU, the network and its training."""
 
@@ -214,42 +214,60 @@ def render(rows: torch.Tensor, volume: torch.Tensor, colors: torch.Tensor) -> to
     return torch.cat([chart[:, None].float() * 255, color], dim=1)
 
 
-class ChartCNN(torch.nn.Module):
-    """Jiang, Kelly and Xiu's 20-day block, adapted (architecture.md): blocks of a 5x3 convolution, BatchNorm, LeakyReLU
-    and a 2x1 max-pool (the price height only, never time), the first with vertical stride 3 and dilation 2; then
-    flatten, dropout and one linear output. Inputs are standardized by channel with `mean` and `sd`."""
+def conv_blocks(filters, channels: int) -> torch.nn.Sequential:
+    """Blocks of a 5x3 convolution, BatchNorm, LeakyReLU and a 2x1 max-pool (the price height only, never time); the
+    first with vertical stride 3 and dilation 2 (Jiang, Kelly and Xiu's 20-day block)."""
+    layers, c_in = [], channels
+    for i, c in enumerate(filters):
+        first = i == 0
+        layers += [torch.nn.Conv2d(c_in, c, (5, 3), stride=(3, 1) if first else 1, dilation=(2, 1) if first else 1,
+                                   padding=(12, 1) if first else (2, 1)),
+                   torch.nn.BatchNorm2d(c), torch.nn.LeakyReLU(), torch.nn.MaxPool2d((2, 1))]
+        c_in = c
+    return torch.nn.Sequential(*layers)
 
-    def __init__(self, filters=(32, 64, 128), dropout=0.5, mean=None, sd=None, height=HEIGHT, width=WIDTH):
+
+def blocks_height(height: int, n_blocks: int) -> int:
+    """The image rows left after conv_blocks (no dry run on the CPU: after LightGBM, a CPU convolution crashes on
+    macOS, two OpenMP runtimes)."""
+    h = (height + 2 * 12 - 2 * (5 - 1) - 1) // 3 + 1  # the first convolution's output height; each pool halves it
+    for _ in range(n_blocks):
+        h //= 2
+    return h
+
+
+def xavier(net: torch.nn.Module):
+    """Xavier-uniform weights and zero biases for every convolution and linear layer."""
+    for m in net.modules():
+        if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
+            torch.nn.init.xavier_uniform_(m.weight)
+            torch.nn.init.zeros_(m.bias)
+
+
+class ChartCNN(torch.nn.Module):
+    """Jiang, Kelly and Xiu's 20-day block, adapted (explanations/CNN/cnn.md): blocks of a 5x3 convolution, BatchNorm, LeakyReLU
+    and a 2x1 max-pool (the price height only, never time), the first with vertical stride 3 and dilation 2; then
+    flatten, dropout and one linear output. Inputs (`channels` of them: 4, or 1 for the grey channel alone) are
+    standardized by channel with `mean` and `sd`."""
+
+    def __init__(self, filters=(32, 64, 128), dropout=0.5, mean=None, sd=None, height=HEIGHT, width=WIDTH, channels=4):
         super().__init__()
-        layers, c_in = [], 4
-        for i, c in enumerate(filters):
-            first = i == 0
-            layers += [torch.nn.Conv2d(c_in, c, (5, 3), stride=(3, 1) if first else 1, dilation=(2, 1) if first else 1,
-                                       padding=(12, 1) if first else (2, 1)),
-                       torch.nn.BatchNorm2d(c), torch.nn.LeakyReLU(), torch.nn.MaxPool2d((2, 1))]
-            c_in = c
-        self.features = torch.nn.Sequential(*layers)
-        h = (height + 2 * 12 - 2 * (5 - 1) - 1) // 3 + 1  # the first convolution's output height; each pool halves it
-        for _ in filters:
-            h //= 2
-        n = c_in * h * width  # no dry run on the CPU: after LightGBM, a CPU convolution crashes on macOS (OpenMP)
+        self.features = conv_blocks(filters, channels)
+        n = filters[-1] * blocks_height(height, len(filters)) * width
         self.head = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Dropout(dropout), torch.nn.Linear(n, 1))
-        for m in self.modules():
-            if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
-                torch.nn.init.xavier_uniform_(m.weight)
-                torch.nn.init.zeros_(m.bias)
-        self.register_buffer("mean", torch.zeros(4) if mean is None else torch.as_tensor(mean, dtype=torch.float32))
-        self.register_buffer("sd", torch.ones(4) if sd is None else torch.as_tensor(sd, dtype=torch.float32))
+        xavier(self)
+        self.register_buffer("mean", torch.zeros(channels) if mean is None else torch.as_tensor(mean, dtype=torch.float32))
+        self.register_buffer("sd", torch.ones(channels) if sd is None else torch.as_tensor(sd, dtype=torch.float32))
 
     def forward(self, x):
-        x = (x - self.mean.view(1, 4, 1, 1)) / self.sd.view(1, 4, 1, 1)
+        x = (x - self.mean.view(1, -1, 1, 1)) / self.sd.view(1, -1, 1, 1)
         return self.head(self.features(x)).squeeze(1)
 
 
 class Images:
     """The drawing data of every stock-day on one device (rows, volume, colors as in `drawing`, stacked)."""
 
-    height, width, predict_batch = HEIGHT, WIDTH, 4096
+    height, width, predict_batch, channels = HEIGHT, WIDTH, 4096, 4
 
     def __init__(self, rows, volume, colors, device):
         self.rows, self.volume, self.colors = (torch.as_tensor(a, device=device) for a in (rows, volume, colors))
@@ -257,6 +275,19 @@ class Images:
 
     def draw(self, idx: torch.Tensor) -> torch.Tensor:
         return render(self.rows[idx], self.volume[idx], self.colors[idx])
+
+    def network(self, p: dict, mean, sd) -> torch.nn.Module:
+        """The network these images train (fit): a ChartCNN of their size and channels."""
+        return ChartCNN(tuple(p["filters"]), p["dropout"], mean, sd, self.height, self.width, self.channels)
+
+
+class GreyImages(Images):
+    """Images with the grey channel alone (the chart without the retail colors): the control for the colors."""
+
+    channels = 1
+
+    def draw(self, idx: torch.Tensor) -> torch.Tensor:
+        return super().draw(idx)[:, :1]
 
 
 def predict(net: ChartCNN, images, idx, batch: int | None = None) -> np.ndarray:
@@ -286,11 +317,11 @@ def fit(images, y: np.ndarray, train: np.ndarray, hold: np.ndarray, p: dict, see
     yt = torch.as_tensor(np.nan_to_num(y / scale).astype(np.float32), device=dev)
     sample = torch.as_tensor(np.sort(rng.choice(train, min(p.get("norm_sample", 20_000), len(train)), replace=False)),
                              device=dev)
-    with torch.no_grad():
+    with torch.no_grad():  # the images' channel means and sds
         step = images.predict_batch
         x = torch.cat([images.draw(sample[i:i + step]) for i in range(0, len(sample), step)])
         mean, sd = x.mean(dim=(0, 2, 3)), x.std(dim=(0, 2, 3)).clamp_min(1e-6)
-    net = ChartCNN(tuple(p["filters"]), p["dropout"], mean, sd, images.height, images.width).to(dev)
+    net = images.network(p, mean, sd).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=p["learning_rate"], weight_decay=p["weight_decay"])
     train_t, hold_np = torch.as_tensor(train, device=dev), np.asarray(hold)
     y_hold = yt[torch.as_tensor(hold_np, device=dev)]
@@ -324,7 +355,7 @@ def fit(images, y: np.ndarray, train: np.ndarray, hold: np.ndarray, p: dict, see
     return net, scale, {"epochs": best_epoch, "holdout_best": -best if score is not None else best}
 
 
-# the multi-day image (explanations/CNN/multiday_design.md): 21 trading days of hourly bars and the decision day's night
+# the multi-day image (explanations/CNN/cnn.md, multi-day images): 21 trading days of hourly bars and the decision day's night
 HOUR_SLOTS = 7  # 09:30, 10:30, ..., 14:30, then 15:30 to the cutoff (on early closes: 09:30 to 11:30, then 12:30)
 LAST_FULL, NIGHT_SLOT = 7, 8  # stored slots: the day's last bar with its last ten minutes (drawn for the past days);
 DAY_SLOTS = 9  # the night before the day (drawn for the decision day only)
@@ -505,7 +536,8 @@ class HourWindows:
     flag, and each target stock-day's stock and day (positions in `row_of`). draw(idx) gathers each target's
     CONTEXT_DAYS days up to its day and renders them."""
 
-    height, width, predict_batch = W_HEIGHT, W_WIDTH, 512  # a 96 x 444 image's activations: about 20 MB
+    height, width, predict_batch, channels = W_HEIGHT, W_WIDTH, 512, 4  # a 96 x 444 image's activations: about 20 MB
+    network = Images.network
 
     def __init__(self, prices, shares, colors, row_of, early, stock, day, device):
         t = lambda a: torch.as_tensor(np.asarray(a), device=device)

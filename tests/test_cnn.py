@@ -212,3 +212,29 @@ def test_render_days_draws_past_days_to_the_close_and_the_decision_day_to_the_cu
     w = DayWindows(prices[0], shares[0], colors[0], np.arange(D_CONTEXT)[None, :], np.zeros(D_CONTEXT, bool), [0],
                    [D_CONTEXT - 1], DEVICE)
     assert (w.draw(torch.tensor([0], device=DEVICE)).cpu().numpy()[0] == img).all()
+
+
+def test_grey_images_draw_the_grey_channel_alone_and_the_network_takes_one_channel():
+    from dsr.cnn import GreyImages  # noqa: PLC0415
+    rows, volume, colors = _blank(2)
+    rows[:, 2] = [10, 5, 20, 15]
+    full, grey = Images(rows, volume, colors, DEVICE), GreyImages(rows, volume, colors, DEVICE)
+    idx = torch.tensor([0, 1], device=DEVICE)
+    assert grey.draw(idx).shape == (2, 1, HEIGHT, WIDTH)
+    assert (grey.draw(idx) == full.draw(idx)[:, :1]).all()
+    net = ChartCNN(channels=1).to(DEVICE)
+    assert net(grey.draw(idx)).shape == (2,) and net.features[0].in_channels == 1
+
+
+def test_fit_runs_on_the_grey_channel_alone():
+    from dsr.cnn import GreyImages  # noqa: PLC0415
+    rng = np.random.default_rng(1)
+    n = 48
+    rows = np.sort(rng.integers(0, PRICE_ROWS, (n, N_SLOTS, 4)), axis=2).astype(np.uint8)
+    volume = rng.integers(0, VOLUME_ROWS + 1, (n, N_SLOTS)).astype(np.uint8)
+    colors = rng.integers(0, 256, (n, N_SLOTS, len(COLORS))).astype(np.uint8)
+    y = rng.normal(0, 0.01, n).astype(np.float32)
+    p = {"filters": (4, 4, 4), "dropout": 0.5, "learning_rate": 1e-3, "weight_decay": 0.05, "batch_size": 16,
+         "max_epochs": 1, "patience": 1, "norm_sample": 16}
+    net, _, _ = fit(GreyImages(rows, volume, colors, DEVICE), y, np.arange(32), np.arange(32, 48), p)
+    assert net.features[0].in_channels == 1 and net.mean.shape == (1,)

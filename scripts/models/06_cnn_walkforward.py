@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Walk-forward of the CNN on chart images
 
-    The main CNN of `explanations/CNN/` (one network on the four channels; `architecture.md`, `training_plan.md`), with its default settings and nothing tuned, refit every year over 2019-2023 and scored like the tabular models (`scripts/models/04_walkforward.py`).
+    The main CNN of `explanations/CNN/cnn.md` (one network on the four channels), with its default settings and nothing tuned, refit every year over 2019-2023 and scored like the tabular models (`scripts/models/04_walkforward.py`).
 
     - **Rows:** every large-cap stock-day (`cap_prev` at least $1B) with drawing data (`scripts/taq/02_cnn_bars.py`) and a row in the model panel; it trains on those with a target, `target_demeaned`.
     - **Folds:** yearly, an expanding window from 2014 (`dsr.walkforward`): train on every earlier day, predict the year. The early-stopping hold-out is the training window's last 12 months, as for the tabular models.
@@ -34,12 +34,13 @@ def _():
     import pandas as pd
     import torch
 
-    from dsr.cnn import ChartCNN, Images, fit, predict
+    from dsr.cnn import ChartCNN, GreyImages, Images, fit, predict
     from dsr.evaluation import daily_rank_ic, measures, summarize
     from dsr.walkforward import fold_rows, folds
 
     return (
         ChartCNN,
+        GreyImages,
         Images,
         Path,
         argparse,
@@ -69,7 +70,7 @@ def _(mo):
     TARGET = "target_demeaned"
     FIRST, EVERY, HOLD_OUT_MONTHS = "2019-01-01", "year", 12
     SEEDS = 1  # an initial run; the plan's final run averages 3 to 5
-    PARAMS = {  # training_plan.md: fixed, with the defaults for the two settings it would tune
+    PARAMS = {  # explanations/CNN/cnn.md (training): fixed, the plan's defaults for the two it would tune
         "filters": [32, 64, 128], "dropout": 0.5, "batch_size": 1024, "max_epochs": 10, "patience": 2,
         "learning_rate": 1e-4, "weight_decay": 0.05, "norm_sample": 20_000,
     }
@@ -84,6 +85,7 @@ def _(
     DEVICE,
     EVERY,
     FIRST,
+    GreyImages,
     HOLD_OUT_MONTHS,
     Images,
     PANEL,
@@ -102,9 +104,9 @@ def _(
     time,
     torch,
 ):
-    def load():
+    def load(grey=False):
         """The stock-days with drawing data and a model-panel row: their keys, target and return, and their drawing
-        data on the GPU."""
+        data on the GPU (drawn with the grey channel alone when `grey`: the control for the retail colors)."""
         with np.load(BARS) as z:
             keys = pd.DataFrame({"day": pd.to_datetime(z["day"]), "permno": z["permno"]})
             arrays = {k: z[k] for k in ("rows", "volume", "colors")}
@@ -112,7 +114,8 @@ def _(
         panel["day"] = pd.to_datetime(panel["day"])
         keys = keys.reset_index(names="pos").merge(panel, on=["day", "permno"], how="inner", validate="one_to_one")
         keys = keys[keys["large_cap"]].reset_index(drop=True)
-        images = Images(*(arrays[k][keys["pos"].to_numpy()] for k in ("rows", "volume", "colors")), DEVICE)
+        images = (GreyImages if grey else Images)(*(arrays[k][keys["pos"].to_numpy()] for k in ("rows", "volume", "colors")),
+                                                  DEVICE)
         return keys, images
 
 
@@ -140,16 +143,24 @@ def _(
                 "minutes_an_epoch_on_all_training_days": round(len(train) / rate / 60, 1)}
 
 
-    def walk_forward(out, n_folds=None, seeds=1):
+    def walk_forward(out, n_folds=None, seeds=1, from_fold=None, grey=False):
         """Fit every yearly fold, predict its year, score it, and write the predictions, the folds' and epochs'
-        measures (after every fold) and the summary to `out`."""
-        keys, images = load()
+        measures (after every fold) and the summary to `out`. With `from_fold` (a fold name, e.g. "2022"), only the folds
+        from it on, added to the earlier folds already in `out` (with the settings they were run with). With `grey`, the
+        network sees the grey channel alone."""
+        keys, images = load(grey)
         day, y = keys["day"].to_numpy(), keys[TARGET].to_numpy(np.float32)
         out.mkdir(parents=True, exist_ok=True)
         (out / "settings.json").write_text(json.dumps({"params": PARAMS, "seeds": seeds, "every": EVERY,
-                                                       "hold_out_months": HOLD_OUT_MONTHS, "target": TARGET}, indent=2))
+                                                       "hold_out_months": HOLD_OUT_MONTHS, "target": TARGET,
+                                                       "channels": "grey" if grey else "grey, red, green, blue"},
+                                                      indent=2))
         predictions, per_fold, epochs = [], [], []
-        for fold in folds(np.unique(day), first=FIRST, every=EVERY)[:n_folds]:
+        if from_fold is not None:  # keep the earlier folds already written
+            kept = lambda name: pd.read_parquet(out / name).pipe(lambda d: d[d["fold"].astype(str) < from_fold])
+            predictions.append(kept("predictions.parquet"))
+            per_fold, epochs = kept("folds.parquet").to_dict("records"), kept("epochs.parquet").to_dict("records")
+        for fold in [f for f in folds(np.unique(day), first=FIRST, every=EVERY) if from_fold is None or f.name >= from_fold][:n_folds]:
             start = time.perf_counter()
             train, hold, rows = fold_rows(day, y, np.ones(len(y), bool), fold, HOLD_OUT_MONTHS, holds_out=True)
             train, hold, rows = np.flatnonzero(train), np.flatnonzero(hold), np.flatnonzero(rows)
@@ -210,10 +221,13 @@ def _(OUT, Path, SEEDS, argparse, mo, speed, sys, walk_forward):
         sub.add_parser("speed", help="measure images a second through a training step")
         r = sub.add_parser("run", help="the yearly walk-forward")
         r.add_argument("--folds", type=int, help="only the first N folds")
+        r.add_argument("--start", help="only the folds from this one (e.g. 2022), added to those already in --out")
+        r.add_argument("--grey", action="store_true", help="the grey channel alone: the control for the retail colors")
         r.add_argument("--seeds", type=int, default=SEEDS)
         r.add_argument("--out", type=Path, default=OUT)
         args = parser.parse_args(argv)
-        print(speed() if args.command == "speed" else walk_forward(args.out, args.folds, args.seeds), flush=True)
+        print(speed() if args.command == "speed" else walk_forward(args.out, args.folds, args.seeds, args.start, args.grey),
+              flush=True)
 
 
     if mo.app_meta().mode == "script" and len(sys.argv) > 1:  # run as a script with a command
