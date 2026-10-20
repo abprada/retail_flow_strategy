@@ -764,7 +764,8 @@ def _(
             # the session alone sets the volume scale: the two bars before it are capped at its tallest bar
             _image.loc[[LAST10_BAR, NIGHT_BAR], "shares"] = np.fmin(_image.loc[[LAST10_BAR, NIGHT_BAR], "shares"],
                                                                     _session["shares"].max())
-            overnight_examples.append({**_e, "with_overnight": draw_four(_image)})
+            overnight_examples.append({**_e, "with_overnight": draw_four(_image),
+                                       "colors": _image[_pixels].to_numpy(dtype=float)})
     overnight_stats = pd.concat(_stats, ignore_index=True)
     return overnight_examples, overnight_stats
 
@@ -828,7 +829,7 @@ def _(mo):
     mo.md(r"""
     ## 21 days in hourly bars
 
-    A look at the multi-day image proposed in `explanations/CNN/multiday_design.md`, on the same example stock-days: the 21 trading days up to the decision day's cutoff, 7 bars a day, 4 × 96 × 441 (76 price rows, an empty row, 19 volume rows: over 21 days the price range is wide, and at 64 rows most hourly bars were one or two rows tall).
+    A look at the multi-day image proposed in `explanations/CNN/cnn.md` (multi-day images), on the same example stock-days: the 21 trading days up to the decision day's cutoff, 7 bars a day, 4 × 96 × 441 (76 price rows, an empty row, 19 volume rows: over 21 days the price range is wide, and at 64 rows most hourly bars were one or two rows tall).
 
     - **Hourly bars:** 09:30, 10:30, 11:30, 12:30, 13:30 and 14:30, then 15:30 to the close. A past day's last bar includes its 15:50-16:00 (the next decision day's `prev_last10`); today's stops at the 15:50 cutoff. Every day takes 7 slots, so an hour sits at the same place every day; on early closes the slots after 12:50 (13:00 on past days) stay empty. Each bar is built from the ten-minute bars: the first round-lot open, the highest high, the lowest low, the last round-lot close, and the counts summed.
     - **Prices adjusted for splits** to the decision day's terms (a past price over the product of CRSP's `facprc_t` on the days after it), and scaled from the window's highest high or moving average to its lowest.
@@ -998,6 +999,52 @@ def _(DAY_SLOTS, WINDOW_DAYS, np, plt, window_examples):
                         "lines between days drawn on the plot only", fontsize=9)
     fig_window.tight_layout()
     fig_window
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## The retail strip: three numbers for each of the 40 bars
+
+    The short-term retail branch of the three-branch model sees no picture. Each of the one-day image's 40 bars (the previous day's last ten minutes, the night, the session's ten-minute bars) becomes a column of three numbers, read by a 1D CNN along time:
+
+    - **retail imbalance** (midpoint rule, in trades): direction;
+    - **retail share of dollars:** intensity;
+    - **abnormal retail activity** (retail trades against the same bar over the previous 20 days): attention.
+
+    Each is standardized across the large caps' same bar that day, as in the image. There is no price shape: a bar without a value (no trades, or after an early close) is 0, the large caps' mean.
+
+    Below, each example's grey image with its strip under it, bar under bar (yellow line: the session starts). Red is above the large caps' mean, blue below, up to ±3 standard deviations.
+    """)
+    return
+
+
+@app.cell
+def _(PRICE_FEATURES, VOLUME_FEATURES, np, overnight_examples, plt):
+    STRIP = {"retail_imbalance": "imbalance", "retail_share": "share", "abnormal_activity": "abnormal"}
+    _cols = [(PRICE_FEATURES + VOLUME_FEATURES).index(_c) for _c in STRIP]
+    _n = len(overnight_examples)
+    fig_strip, _axes = plt.subplots(2 * _n, 1, figsize=(11, 1.6 * _n + 0.6), squeeze=False, layout="constrained",
+                                    gridspec_kw={"height_ratios": [4, 1] * _n})
+    for _i, _e in enumerate(overnight_examples):
+        _ax_img, _ax_strip = _axes[2 * _i, 0], _axes[2 * _i + 1, 0]
+        _strip = np.full((len(STRIP), 40), 128.0)  # 40 bars; an early close's empty bars at the mean
+        _values = _e["colors"][:, _cols].T
+        _strip[:, :_values.shape[1]] = np.nan_to_num(_values, nan=128)
+        _ax_img.imshow(_e["with_overnight"][0], cmap="gray", vmin=0, vmax=255, interpolation="nearest", aspect="auto")
+        _shown = _ax_strip.imshow(_strip / 255 * 6 - 3, cmap="RdBu_r", vmin=-3, vmax=3, interpolation="nearest",
+                                  aspect="auto", extent=(-0.5, 119.5, len(STRIP) - 0.5, -0.5))
+        _ax_img.set_ylabel(f"{_e['symbol']}\n{_e['day']:%Y-%m-%d}\n\\${_e['cap_prev'] / 1e6:.0f}B", fontsize=7)
+        _ax_strip.set_yticks(range(len(STRIP)), list(STRIP.values()), fontsize=6)
+        _ax_img.set_yticks([])
+        for _ax in (_ax_img, _ax_strip):
+            _ax.set_xlim(-0.5, 119.5)
+            _ax.axvline(5.5, color="yellow", lw=0.6)
+            _ax.set_xticks([])
+    fig_strip.colorbar(_shown, ax=_axes[:, 0].tolist(), fraction=0.02, pad=0.01, label="standard deviations")
+    fig_strip.suptitle("The retail strip (3 x 40) under each one-day grey image, bar under bar", fontsize=9)
+    fig_strip
     return
 
 
