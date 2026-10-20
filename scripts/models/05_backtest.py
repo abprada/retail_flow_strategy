@@ -9,7 +9,7 @@ def _(mo):
     mo.md(r"""
     # Backtest: long-short portfolios on each model's predictions
 
-    Trades each model's monthly walk-forward predictions (`scripts/models/04_walkforward.py`) over 2019-2023 on the ≥ $1B stocks. Each day, the portfolio buys the top quintile (or decile) of the stocks by prediction and sells the bottom one short, equal-weighted with $1 a side, at the close, and holds them to the next close. The plan is in `explanations/models/backtest.md`.
+    Trades each model's walk-forward predictions over 2019-2023 on the ≥ $1B stocks: the tabular models' monthly refits (`scripts/models/04_walkforward.py`) and the CNN on one-day chart images, refit yearly (`cnn_one_day`, `scripts/models/06_cnn_walkforward.py`). Each day, the portfolio buys the top quintile (or decile) of the stocks by prediction and sells the bottom one short, equal-weighted with $1 a side, at the close, and holds them to the next close. The plan is in `explanations/models/models.md`.
 
     - **Before costs** (user decision): no spreads, commissions or borrow fees. Turnover is shown: it is what a cost per dollar traded would multiply.
     - **Hit rates are counted per trade:** a stock's stay in one leg, from the close it enters to the close it leaves.
@@ -42,7 +42,14 @@ def _(mo):
 def _(mo):
     WALKFORWARD = mo.notebook_dir().parents[1] / "data" / "walkforward"  # 04's predictions, one folder per model
     PANEL = mo.notebook_dir().parents[1] / "data" / "processed" / "model_panel_train.parquet"  # the universe's caps
-    MODELS = ("linear", "mlp", "lgbm")
+    MODELS = ("linear", "mlp", "lgbm", "lgbm_yearly", "lgbm_yearly_refit", "cnn_one_day",  # the benchmark: lgbm_yearly_refit
+              "two_branch/comb_s3", "two_branch/tab_s3", "two_branch/price_s3", "two_branch/price_s1",
+              "two_branch/tab_s1", "two_branch_lambda0/comb_s3")
+    _choices = WALKFORWARD / "two_branch" / "choices.json"
+    if _choices.exists():  # step 2's chosen setting, once `choose` has run
+        import json  # noqa: PLC0415
+        _step2 = json.loads(_choices.read_text()).get("step2")
+        MODELS = MODELS + ((f"two_branch/comb_s2_{_step2}",) if _step2 else ())
     CUTS = {"quintiles": 5, "deciles": 10}  # long the top bucket, short the bottom one
     return CUTS, MODELS, PANEL, WALKFORWARD
 
