@@ -239,7 +239,7 @@ def blocks_height(height: int, n_blocks: int) -> int:
 def xavier(net: torch.nn.Module):
     """Xavier-uniform weights and zero biases for every convolution and linear layer."""
     for m in net.modules():
-        if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
+        if isinstance(m, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Linear)):
             torch.nn.init.xavier_uniform_(m.weight)
             torch.nn.init.zeros_(m.bias)
 

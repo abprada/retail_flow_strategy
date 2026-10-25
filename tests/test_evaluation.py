@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from dsr.evaluation import (_group_rank, daily_decile_spread, daily_ic_and_deciles, daily_rank_ic, decile_means,
-                            ic_summary, mse, r2_zero)
+                            ic_summary, mse, r2_summary, r2_zero)
 
 
 def _days(n_days=3, n=50, seed=0):
@@ -73,3 +73,12 @@ def test_ranks_and_ic_match_pandas_with_ties_and_shuffled_rows():
     ic, deciles = daily_ic_and_deciles(day, pred, ret)
     assert np.allclose(ic.to_numpy(), spearman) and np.allclose(daily_rank_ic(day, pred, ret), ic)
     assert np.allclose(deciles, decile_means(day, pred, ret))
+
+
+def test_r2_summary_pools_the_days_like_r2_zero():
+    day, ret = _days(n_days=10)
+    pred = 0.3 * ret + np.random.default_rng(1).normal(size=len(ret))
+    s = r2_summary(day, pred, ret)
+    assert s["r2_pct"] == pytest.approx(100 * r2_zero(pred, ret))
+    gain = (ret ** 2 - (ret - pred) ** 2).groupby(day).sum()
+    assert s["r2_t"] == pytest.approx(ic_summary(gain)["ic_t"])

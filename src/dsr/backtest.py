@@ -75,6 +75,18 @@ def daily(held: pd.DataFrame, average: pd.Series) -> pd.DataFrame:
     return out
 
 
+def books(days: pd.DataFrame) -> dict[str, tuple[pd.Series, pd.Series]]:
+    """Five daily return series from `daily`'s frame, each with its daily turnover: the long-short (its turnover the
+    mean of the legs': the share of the $2 book replaced), each leg as held (the short leg's return is minus its
+    stocks'), and each leg against the day's average (long minus average; average minus short), which add up to the
+    long-short."""
+    both = (days["turnover_long"] + days["turnover_short"]) / 2
+    return {"long-short": (days["long_short"], both), "long leg": (days["long"], days["turnover_long"]),
+            "short leg": (-days["short"], days["turnover_short"]),
+            "long leg − average": (days["long_vs_average"], days["turnover_long"]),
+            "average − short leg": (days["short_vs_average"], days["turnover_short"])}
+
+
 def trades(held: pd.DataFrame, days: pd.DatetimeIndex) -> pd.DataFrame:
     """Each trade: a stock's stay in one leg over consecutive days of `days`, from the close it is bought (or sold
     short) to the close it leaves the leg. Columns permno, leg, entry (its first day), days (held), ret (the stock's
@@ -121,6 +133,50 @@ def summary(days: pd.DataFrame, trades: pd.DataFrame, held: pd.DataFrame) -> dic
             "trades": int(len(trades)), "holding_days": float(trades["days"].mean()),
             **{f"trade_{k}": v for k, v in hit_rates(trades).items()},
             **{f"day_{k}": v for k, v in hit_rates(held).items()}}
+
+
+def drawdowns(returns: pd.Series) -> pd.Series:
+    """The length in days of each drawdown of the summed returns: each run of consecutive days below the running peak
+    (which starts at 0, as in `summary`); the last one counts to the sample's end if it never recovered."""
+    cum = returns.fillna(0).cumsum()
+    under = (np.maximum(cum.cummax(), 0) - cum > 0).to_numpy()
+    spell = np.cumsum(under & ~np.r_[False, under[:-1]])[under]
+    return pd.Series(np.bincount(spell)[1:], name="days")
+
+
+def stress(returns: pd.Series, market: pd.Series, drop: float = 0.01) -> dict:
+    """One daily return series, summed like the long-short (a book of $1 a side): its mean (bp, and annualized in %) and
+    Newey-West t-statistic; annualized volatility; the annualized Sharpe ratio and its t-statistic (Mertens' standard
+    error, which allows for skewness and kurtosis but not autocorrelation); the Sortino ratio (its downside deviation
+    is the root mean square of the days below 0, over every day); its distribution (skewness, excess kurtosis, percentiles, worst and best day, in bp); the largest drawdown
+    (%), the number of drawdowns and their mean and longest length in days (`drawdowns`); the share of winning days
+    and the average win and loss (bp); the correlation with `market` (the universe's average return, by day); and the
+    mean and Sharpe ratio without the best `drop` of the days and without the best `drop` of the winning days (each
+    count rounded, at least one day)."""
+    r = returns.dropna()
+    wins, losses = r[r > 0], r[r < 0]
+    cum = r.cumsum()
+    lengths = drawdowns(r)
+    sharpe = lambda s: float(np.sqrt(DAYS_A_YEAR) * s.mean() / s.std())
+    without = lambda best: r.drop(best.nlargest(max(1, round(drop * len(best)))).index)
+    daily_sharpe = float(r.mean() / r.std())
+    sharpe_se = np.sqrt((1 - r.skew() * daily_sharpe + (r.kurt() + 2) / 4 * daily_sharpe ** 2) / len(r))
+    out = {"mean_bp": 1e4 * float(r.mean()), "annual_mean_pct": 100 * DAYS_A_YEAR * float(r.mean()),
+           "t": ic_summary(r)["ic_t"], "annual_vol_pct": 100 * np.sqrt(DAYS_A_YEAR) * float(r.std()),
+           "sharpe": sharpe(r), "sharpe_t": float(daily_sharpe / sharpe_se),
+           "sortino": float(np.sqrt(DAYS_A_YEAR) * r.mean() / np.sqrt((np.minimum(r, 0) ** 2).mean())),
+           "skew": float(r.skew()), "excess_kurtosis": float(r.kurt()),
+           **{f"p{q}_bp": 1e4 * float(r.quantile(q / 100)) for q in (1, 5, 50, 95, 99)},
+           "worst_bp": 1e4 * float(r.min()), "best_bp": 1e4 * float(r.max()),
+           "max_drawdown_pct": 100 * float((np.maximum(cum.cummax(), 0) - cum).max()),
+           "drawdowns": len(lengths), "drawdown_days_mean": float(lengths.mean()),
+           "drawdown_days_max": float(lengths.max()),
+           "win_days": float((r > 0).mean()), "average_win_bp": 1e4 * float(wins.mean()),
+           "average_loss_bp": 1e4 * float(losses.mean()), "corr_universe": float(r.corr(market.reindex(r.index)))}
+    for name, best in (("best_days", r), ("best_wins", wins)):
+        rest = without(best)
+        out[f"mean_bp_without_{name}"], out[f"sharpe_without_{name}"] = 1e4 * float(rest.mean()), sharpe(rest)
+    return out
 
 
 def yearly(days: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:

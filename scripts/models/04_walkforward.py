@@ -40,12 +40,13 @@ def _():
     from dsr.evaluation import ic_summary, measures, summarize
     from dsr.explain import linear_inference, sage_values, shap_values
     from dsr.models import fit
-    from dsr.walkforward import feature_columns, fold_rows, folds
+    from dsr.walkforward import crossfit_folds, feature_columns, fold_rows, folds
 
     return (
         Path,
         alt,
         argparse,
+        crossfit_folds,
         feature_columns,
         fit,
         fold_rows,
@@ -81,6 +82,7 @@ def _(mo):
 @app.cell
 def _(mo):
     PANEL = mo.notebook_dir().parents[1] / "data" / "processed" / "model_panel_train.parquet"
+    TEST_PANEL = mo.notebook_dir().parents[1] / "data" / "processed" / "model_panel_test.parquet"  # read only by --test
     OUT = mo.notebook_dir().parents[1] / "data" / "walkforward"  # one folder per model
     PROJECT = "daily-stock-returns-v5"
     SWEEP_SUFFIX = "-quarterly-v5"  # the sweeps whose chosen runs are rerun: linear-quarterly-v5, ...
@@ -89,6 +91,9 @@ def _(mo):
     # the elastic net's: the region choice by MSE, which backtested better than its highest rank IC (section 2)
     RUNS = {"linear": "driven-sweep-41", "mlp": "major-sweep-29", "lgbm": "winter-sweep-17"}
     FIRST = "2019-01-01"
+    TEST_FIRST = "2024-01-01"  # --test: the test years, 2024-2025, run once with the validation run's settings
+    CROSSFIT_YEARS = (2014, 2015, 2016, 2017, 2018)  # --crossfit: each year predicted from the other four
+    EMBARGO_DAYS = 20  # --crossfit: trading days after the year not trained on (the features look back 20 days)
     HOLD_OUT_MONTHS = 12  # LightGBM's and the MLP's early-stopping hold-out, as in the sweeps
     SEEDS = 5  # LightGBM and the MLP average seeds 0-4, as in 03's comparison
     SHAP_ROWS = 5_000  # >= $1B rows whose SHAP values are kept each month, drawn at random from the month's
@@ -96,6 +101,8 @@ def _(mo):
     BACKGROUND_ROWS = 32  # >= $1B training rows whose values stand in for a feature left out (SHAP and SAGE)
     return (
         BACKGROUND_ROWS,
+        CROSSFIT_YEARS,
+        EMBARGO_DAYS,
         FIRST,
         HOLD_OUT_MONTHS,
         MODELS,
@@ -107,6 +114,8 @@ def _(mo):
         SEEDS,
         SHAP_ROWS,
         SWEEP_SUFFIX,
+        TEST_FIRST,
+        TEST_PANEL,
     )
 
 
@@ -181,12 +190,17 @@ def _(mo):
 @app.cell
 def _(
     BACKGROUND_ROWS,
+    CROSSFIT_YEARS,
+    EMBARGO_DAYS,
     FIRST,
     HOLD_OUT_MONTHS,
     PANEL,
     SAGE_PERMUTATIONS,
     SEEDS,
     SHAP_ROWS,
+    TEST_FIRST,
+    TEST_PANEL,
+    crossfit_folds,
     feature_columns,
     fit,
     fold_rows,
@@ -203,9 +217,12 @@ def _(
     time,
 ):
     @functools.cache
-    def arrays(bjzz, target):
-        """The training panel as compact arrays, made once per process: the features as one float32 matrix."""
+    def arrays(bjzz, target, test=False):
+        """The training panel as compact arrays, made once per process: the features as one float32 matrix. With
+        `test`, the test panel follows it, for the test years' walk-forward."""
         df = pd.read_parquet(PANEL)
+        if test:
+            df = pd.concat([df, pd.read_parquet(TEST_PANEL)], ignore_index=True)
         features = feature_columns(df.columns, bjzz=bjzz)
         return {"features": features, "x": df[features].to_numpy("float32"), "y": df[target].to_numpy("float32"),
                 "day": df["day"].to_numpy(), "permno": df["permno"].to_numpy(),
@@ -222,21 +239,26 @@ def _(
         return shap, np.abs(shap).mean(axis=0), slope
 
 
-    def walk_forward(kind, chosen, out, months=None, every="month", refit=False):
+    def walk_forward(kind, chosen, out, months=None, every="month", refit=False, test=False, crossfit=False):
         """Refit every month (or every year, `every`) with the chosen run's settings, predict and score the period,
         explain the refit, and write it all to `out`. `months` keeps only the first periods, as a quick check. With
-        `refit` (LightGBM), each fit is redone on the training rows and the hold-out with the early-stopped tree count."""
+        `refit` (LightGBM), each fit is redone on the training rows and the hold-out with the early-stopped tree count.
+        With `test`, the periods are the test years', on the training and test panels. With `crossfit`, each of
+        CROSSFIT_YEARS is predicted from the other four (crossfit_folds), without the SHAP and SAGE explanations: the
+        out-of-sample predictions of the years before the first fold."""
         cfg = {**chosen["settings"], **({"seeds": SEEDS} if kind != "linear" else {}),
                **({"refit_with_holdout": True} if refit else {})}
         target = cfg["target"]
-        a = arrays(cfg["bjzz"], target)
+        a = arrays(cfg["bjzz"], target, test)
         x, y, day, large, features = a["x"], a["y"], a["day"], a["large"], a["features"]
         out.mkdir(parents=True, exist_ok=True)
         (out / "settings.json").write_text(json.dumps(
             {**chosen, "settings": cfg, "shap_rows": SHAP_ROWS, "sage_permutations": SAGE_PERMUTATIONS,
              "background_rows": BACKGROUND_ROWS}, indent=2))
         predictions, per_fold, betas, shap_folds, shap_rows, sage_days = [], [], [], [], [], []
-        for i, fold in enumerate(folds(np.unique(day), first=FIRST, every=every)[:months]):
+        periods = (crossfit_folds(np.unique(day), CROSSFIT_YEARS, EMBARGO_DAYS) if crossfit
+                   else folds(np.unique(day), first=TEST_FIRST if test else FIRST, every=every))
+        for i, fold in enumerate(periods[:months]):
             start = time.perf_counter()
             fit_rows, hold, rows = fold_rows(day, y, large, fold, HOLD_OUT_MONTHS, holds_out=kind != "linear",
                                              train_rows=cfg.get("train_rows", "all"))
@@ -252,7 +274,7 @@ def _(
                 beta, se = linear_inference(x[fit_rows], y[fit_rows], day[fit_rows], **model.linear)
                 betas.append(pd.DataFrame({"fold": fold.name, "feature": features, "beta_bp": 1e4 * beta,
                                            "se_bp": 1e4 * se, "t": beta / se}))
-            else:
+            elif not crossfit:
                 rng = np.random.default_rng(i)
                 pool = np.flatnonzero(rows & large & ~np.isnan(y))  # the month's >= $1B rows with a target
                 background = x[rng.choice(np.flatnonzero(fit_rows & large), BACKGROUND_ROWS, replace=False)]
@@ -295,6 +317,9 @@ def _(mo):
     uv run python scripts/models/04_walkforward.py run                                  # every model: linear, mlp, lgbm, one process each
     uv run python scripts/models/04_walkforward.py run --models lgbm
     uv run python scripts/models/04_walkforward.py run --months 2 --out /tmp/check      # a quick check
+    uv run python scripts/models/04_walkforward.py run --models lgbm --every year --test  # the test years, once
+    uv run python scripts/models/04_walkforward.py run --models lgbm --every year --crossfit  # 2014-2018, cross-fitted
+    uv run python scripts/models/04_walkforward.py run --models linear --crossfit
     ```
 
     Opened in marimo, this cell only shows the commands.
@@ -303,7 +328,7 @@ def _(mo):
 
 
 @app.cell
-def _(MODELS, OUT, Path, RUNS, argparse, mo, subprocess, sweep_run, sys, walk_forward):
+def _(MODELS, OUT, Path, RUNS, argparse, json, mo, subprocess, sweep_run, sys, walk_forward):
     def run_from_terminal(argv):
         parser = argparse.ArgumentParser(prog="04_walkforward.py")
         sub = parser.add_subparsers(dest="command", required=True)
@@ -316,6 +341,12 @@ def _(MODELS, OUT, Path, RUNS, argparse, mo, subprocess, sweep_run, sys, walk_fo
         r.add_argument("--refit", action="store_true",
                        help="LightGBM only: fit again on the training rows and the hold-out with the early-stopped tree "
                             "count; results go to <model>[_yearly]_refit")
+        r.add_argument("--test", action="store_true",
+                       help="the test years (2024-2025), once, with the settings the validation run wrote to "
+                            "<out>/<model>[_yearly][_refit]/settings.json; results go to <out>/test/")
+        r.add_argument("--crossfit", action="store_true",
+                       help="2014-2018, each year predicted from the other four, with the settings the validation run "
+                            "wrote to <out>/<model>[_yearly][_refit]/settings.json; results go to <out>/crossfit/")
         args = parser.parse_args(argv)
         if args.refit and args.models != ["lgbm"]:
             raise SystemExit("--refit is for LightGBM only: run it with --models lgbm")
@@ -325,17 +356,24 @@ def _(MODELS, OUT, Path, RUNS, argparse, mo, subprocess, sweep_run, sys, walk_fo
             for kind in args.models:
                 subprocess.run([sys.executable, sys.argv[0], "run", "--models", kind, "--out", str(args.out),
                                 "--every", args.every, *(["--refit"] if args.refit else []),
+                                *(["--test"] if args.test else []), *(["--crossfit"] if args.crossfit else []),
                                 *(["--months", str(args.months)] if args.months else [])],
                                check=True)
             return
         kind = args.models[0]
-        chosen = sweep_run(kind)
+        name = kind + ("_yearly" if args.every == "year" else "") + ("_refit" if args.refit else "")
+        out = args.out / "test" / name if args.test else args.out / "crossfit" / name if args.crossfit else args.out / name
+        if args.test and (out / "summary.json").exists():
+            raise SystemExit(f"{out} already holds the test's results: the test runs once")
+        # the test and the cross-fit reuse the validation run's settings as written, so nothing is looked up again
+        frozen = args.test or args.crossfit
+        chosen = json.loads((args.out / name / "settings.json").read_text()) if frozen else sweep_run(kind)
         if chosen is None:
             raise SystemExit(f"{kind}: its sweep has no finished run named {RUNS[kind]}")
         print(f"{kind}: {chosen['run']} ({chosen['metric']} {chosen['value']:.6g}, rank {chosen['rank']} of "
               f"{chosen['finished_runs']}; best {chosen['best_run']} {chosen['best_value']:.6g})", flush=True)
-        name = kind + ("_yearly" if args.every == "year" else "") + ("_refit" if args.refit else "")
-        walk_forward(kind, chosen, args.out / name, months=args.months, every=args.every, refit=args.refit)
+        walk_forward(kind, chosen, out, months=args.months, every=args.every, refit=args.refit, test=args.test,
+                     crossfit=args.crossfit)
 
 
     if mo.app_meta().mode == "script" and len(sys.argv) > 1:  # run as a script with a command

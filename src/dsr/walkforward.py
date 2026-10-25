@@ -32,6 +32,21 @@ def folds(days, first: str, every: str) -> list[Fold]:
     return [Fold(str(p), days[days < p.start_time], later[periods == p]) for p in periods.unique()]
 
 
+def crossfit_folds(days, years, embargo: int) -> list[Fold]:
+    """One fold per year of `years`: train on the days of the other years, predict the year. Cross-fitting gives
+    out-of-sample predictions for years no walk-forward fold predicts (those before its first fold). The first `embargo`
+    trading days after the year are not trained on: their features look back into it."""
+    days = pd.DatetimeIndex(sorted(set(pd.DatetimeIndex(days))))
+    years = list(years)
+    inside = days[days.year.isin(years)]
+    out = []
+    for year in years:
+        predict = inside[inside.year == year]
+        after = inside[inside > predict.max()][:embargo]
+        out.append(Fold(str(year), inside[(inside.year != year) & ~inside.isin(after)], predict))
+    return out
+
+
 def last_months(days: pd.DatetimeIndex, months: int) -> pd.DatetimeIndex:
     """The days in the last `months` months of a training window: the early-stopping hold-out."""
     return days[days > days.max() - pd.DateOffset(months=months)]

@@ -42,14 +42,16 @@ def _(mo):
 def _(mo):
     WALKFORWARD = mo.notebook_dir().parents[1] / "data" / "walkforward"  # 04's predictions, one folder per model
     PANEL = mo.notebook_dir().parents[1] / "data" / "processed" / "model_panel_train.parquet"  # the universe's caps
-    MODELS = ("linear", "mlp", "lgbm", "lgbm_yearly", "lgbm_yearly_refit", "cnn_one_day",  # the benchmark: lgbm_yearly_refit
-              "two_branch/comb_s3", "two_branch/tab_s3", "two_branch/price_s3", "two_branch/price_s1",
-              "two_branch/tab_s1", "two_branch_lambda0/comb_s3")
-    _choices = WALKFORWARD / "two_branch" / "choices.json"
+    MODELS = ("linear", "mlp", "lgbm", "lgbm_yearly", "lgbm_yearly_refit",  # the benchmark: lgbm_yearly
+              "cnn_one_day_grey", "two_branch_day_cnn/comb_s3", "two_branch_day_cnn/tab_ref_s3",
+              "two_branch_day_cnn/tab_s3", "two_branch_day_cnn/price_s3", "two_branch_day_cnn/price_s1",
+              "two_branch_day_cnn/tab_s1", "two_branch_day_cnn_lambda0/comb_s3",
+              "two_branch_day_cnn_lam0.1/comb_s3")  # comb_s3: the model the rule judged; lam0.1: the CNN family's pick
+    _choices = WALKFORWARD / "two_branch_day_cnn" / "choices.json"
     if _choices.exists():  # step 2's chosen setting, once `choose` has run
         import json  # noqa: PLC0415
         _step2 = json.loads(_choices.read_text()).get("step2")
-        MODELS = MODELS + ((f"two_branch/comb_s2_{_step2}",) if _step2 else ())
+        MODELS = MODELS + ((f"two_branch_day_cnn/comb_s2_{_step2}",) if _step2 else ())
     CUTS = {"quintiles": 5, "deciles": 10}  # long the top bucket, short the bottom one
     return CUTS, MODELS, PANEL, WALKFORWARD
 

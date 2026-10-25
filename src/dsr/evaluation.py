@@ -1,5 +1,5 @@
 """Signal evaluation (explanations/models/features.md, validation measures): daily rank IC, its
-summary, R² against zero, mean squared error, and the average return by prediction decile; `measures` and
+summary, R² against zero (and its t-statistic), mean squared error, and the average return by prediction decile; `measures` and
 `summarize` put them together for a set of scored predictions. Callers pass the stocks scored (>= $1B)."""
 
 import numpy as np
@@ -89,6 +89,17 @@ def r2_zero(pred: np.ndarray, target: np.ndarray) -> float:
     pred, target = np.asarray(pred, dtype=float), np.asarray(target, dtype=float)
     ok = ~(np.isnan(pred) | np.isnan(target))
     return float(1 - ((target[ok] - pred[ok]) ** 2).sum() / (target[ok] ** 2).sum())
+
+
+def r2_summary(day, pred, target) -> dict:
+    """R² against zero (`r2_zero`) in percent and its Newey-West t-statistic: each day's fall in the sum of squared
+    errors from a prediction of 0, its mean over days divided by the mean daily sum of squared targets; the t is the
+    daily fall's (as 04 tests the SAGE values)."""
+    df = pd.DataFrame({"day": np.asarray(day), "pred": np.asarray(pred, dtype=float),
+                       "target": np.asarray(target, dtype=float)}).dropna()
+    df = df.assign(gain=df["target"] ** 2 - (df["target"] - df["pred"]) ** 2, total=df["target"] ** 2)
+    g = df.groupby("day")[["gain", "total"]].sum()
+    return {"r2_pct": 100 * float(g["gain"].sum() / g["total"].sum()), "r2_t": ic_summary(g["gain"])["ic_t"]}
 
 
 def mse(pred: np.ndarray, target: np.ndarray) -> float:

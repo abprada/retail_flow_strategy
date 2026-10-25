@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dsr.walkforward import feature_columns, fold_rows, folds, last_months
+from dsr.walkforward import crossfit_folds, feature_columns, fold_rows, folds, last_months
 
 
 def test_yearly_folds_train_on_every_earlier_day_and_predict_the_year():
@@ -23,6 +23,30 @@ def test_quarterly_folds_and_the_five_year_minimum():
         folds(days, first="2018-01-01", every="year")  # only 4 years before it
     # the sample starts on its first trading day, 2 January: still 5 full years before 2019
     assert len(folds(pd.bdate_range("2014-01-02", "2023-12-31"), first="2019-01-01", every="year")) == 5
+
+
+def test_crossfit_folds_predict_each_year_from_the_other_years_with_an_embargo_after_it():
+    days = pd.bdate_range("2014-01-01", "2019-12-31")  # 2019 is outside the cross-fit years: never used
+    f = crossfit_folds(days, years=range(2014, 2019), embargo=20)
+    assert [x.name for x in f] == ["2014", "2015", "2016", "2017", "2018"]
+    for x in f:
+        year = int(x.name)
+        assert (x.predict_days == days[days.year == year]).all()
+        assert not x.train_days.year.isin([year, 2019]).any()
+    f2015 = f[1]
+    after = days[days.year == 2016][:20]  # the 20 trading days after 2015: their features look back into it
+    assert not f2015.train_days.isin(after).any()
+    assert days[days.year == 2016][20] in f2015.train_days  # the 21st is trained on
+    assert f2015.train_days.isin(days[days.year == 2014]).sum() == (days.year == 2014).sum()  # all days before it
+    assert len(f[-1].train_days) == days.year.isin(range(2014, 2018)).sum()  # nothing after 2018 to leave out
+
+
+def test_crossfit_folds_hold_out_the_latest_other_year():
+    days = pd.bdate_range("2014-01-01", "2018-12-31")
+    f = {x.name: x for x in crossfit_folds(days, years=range(2014, 2019), embargo=20)}
+    assert (last_months(f["2016"].train_days, 12).year == 2018).all()
+    held = last_months(f["2018"].train_days, 12)  # the 12 months to 2017's last day, 29 December
+    assert held.max() == pd.Timestamp("2017-12-29") and held.min() == pd.Timestamp("2016-12-30")
 
 
 def test_last_months_holds_out_the_end_of_the_training_window():

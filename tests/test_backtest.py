@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dsr.backtest import daily, positions, summary, trades, turnover, universe, yearly
+from dsr.backtest import books, daily, drawdowns, positions, stress, summary, trades, turnover, universe, yearly
 
 
 def _panel(rets, preds=None):
@@ -45,6 +45,9 @@ def test_daily_returns_are_the_long_leg_minus_the_short_leg_and_each_against_the
     assert d["long_short"].iloc[0] == pytest.approx(0.02)
     assert d["long_vs_average"].iloc[0] == pytest.approx(0.01) and d["short_vs_average"].iloc[0] == pytest.approx(0.01)
     assert d["long_short"].iloc[1] == pytest.approx(-0.02)
+    b = books(d)
+    assert b["short leg"][0].iloc[0] == pytest.approx(-0.005)
+    assert (b["long leg − average"][0] + b["average − short leg"][0]).equals(b["long-short"][0])
 
 
 def test_turnover_is_the_share_of_the_leg_replaced_after_the_returns_move_the_weights():
@@ -94,3 +97,27 @@ def test_universe_returns_equal_and_value_weighted():
     assert len(u) == 2
     assert u["equal"].iloc[0] == pytest.approx(0.02) and u["value"].iloc[0] == pytest.approx(0.015)
     assert u["equal"].iloc[1] == pytest.approx(0.01)  # the missing return counts as 0, as in positions
+
+
+def test_a_drawdown_is_a_run_of_days_below_the_running_peak():
+    r = pd.Series([1.0, -2.0, 1.0, 2.0, -1.0, -1.0, 3.0, -1.0])  # summed: 1, -1, 0, 2, 1, 0, 3, 2
+    assert list(drawdowns(r)) == [2, 2, 1]  # the last one has not recovered
+    assert list(drawdowns(pd.Series([-1.0, 2.0]))) == [1]  # the peak starts at 0
+    assert drawdowns(pd.Series([1.0, 1.0])).empty
+
+
+def test_stress_of_a_known_series():
+    days = pd.bdate_range("2020-01-01", periods=5)
+    r = pd.Series([0.04, -0.01, -0.02, -0.01, 0.01], index=days)
+    market = pd.Series([0.02, 0.0, -0.01, 0.0, 0.01], index=days)
+    s = stress(r, market, drop=0.4)
+    assert s["mean_bp"] == pytest.approx(20) and s["annual_mean_pct"] == pytest.approx(50.4)
+    sr = r.mean() / r.std()
+    assert s["sharpe_t"] == pytest.approx(sr / np.sqrt((1 - r.skew() * sr + (r.kurt() + 2) / 4 * sr ** 2) / 5))
+    assert s["sortino"] == pytest.approx(np.sqrt(252) * 0.002 / np.sqrt(0.0006 / 5))
+    assert s["win_days"] == 0.4 and s["average_win_bp"] == pytest.approx(250)
+    assert s["average_loss_bp"] == pytest.approx(-400 / 3)
+    assert s["drawdowns"] == 1 and s["drawdown_days_mean"] == 4 and s["max_drawdown_pct"] == pytest.approx(4)
+    assert s["corr_universe"] == pytest.approx(np.corrcoef(r, market)[0, 1])
+    assert s["mean_bp_without_best_days"] == pytest.approx(-400 / 3)  # 40% of 5 days: the 4% and the 1% days
+    assert s["mean_bp_without_best_wins"] == pytest.approx(-75)  # 40% of the 2 winning days, rounded: the 4% day
