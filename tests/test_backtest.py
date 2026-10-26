@@ -2,7 +2,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dsr.backtest import books, daily, drawdowns, positions, stress, summary, trades, turnover, universe, yearly
+from dsr.backtest import (books, daily, drawdowns, positions, sharpe_t, stress, summary, trades, turnover, universe,
+                          yearly)
+from dsr.evaluation import ic_summary
 
 
 def _panel(rets, preds=None):
@@ -113,7 +115,7 @@ def test_stress_of_a_known_series():
     s = stress(r, market, drop=0.4)
     assert s["mean_bp"] == pytest.approx(20) and s["annual_mean_pct"] == pytest.approx(50.4)
     sr = r.mean() / r.std()
-    assert s["sharpe_t"] == pytest.approx(sr / np.sqrt((1 - r.skew() * sr + (r.kurt() + 2) / 4 * sr ** 2) / 5))
+    assert s["sharpe_t"] == pytest.approx(sharpe_t(r))
     assert s["sortino"] == pytest.approx(np.sqrt(252) * 0.002 / np.sqrt(0.0006 / 5))
     assert s["win_days"] == 0.4 and s["average_win_bp"] == pytest.approx(250)
     assert s["average_loss_bp"] == pytest.approx(-400 / 3)
@@ -121,3 +123,25 @@ def test_stress_of_a_known_series():
     assert s["corr_universe"] == pytest.approx(np.corrcoef(r, market)[0, 1])
     assert s["mean_bp_without_best_days"] == pytest.approx(-400 / 3)  # 40% of 5 days: the 4% and the 1% days
     assert s["mean_bp_without_best_wins"] == pytest.approx(-75)  # 40% of the 2 winning days, rounded: the 4% day
+
+
+def test_sharpe_t_without_lags_is_mertens_with_the_sample_moments():
+    r = pd.Series(0.001 + 0.01 * np.random.default_rng(0).standard_t(4, 300))
+    x = r - r.mean()
+    sd = np.sqrt((x ** 2).mean())
+    sr, skew, kurt = r.mean() / sd, (x ** 3).mean() / sd ** 3, (x ** 4).mean() / sd ** 4
+    assert sharpe_t(r, lags=0) == pytest.approx(sr / np.sqrt((1 - skew * sr + (kurt - 1) / 4 * sr ** 2) / len(r)))
+
+
+def test_sharpe_t_of_returns_of_one_size_is_the_newey_west_t_of_their_mean_scaled():
+    rng, up = np.random.default_rng(1), [True]
+    for u in rng.random(399):
+        up.append(u > 0.2 if up[-1] else u < 0.4)  # runs of up and down days: autocorrelated, more up than down
+    r = pd.Series(np.where(up, 0.01, -0.01))  # r² is constant, so only the mean is uncertain
+    assert sharpe_t(r) == pytest.approx(ic_summary(r)["ic_t"] * (1 - r.mean() ** 2 / (r ** 2).mean()))
+
+
+def test_sharpe_t_is_lower_when_returns_run_on():
+    e = np.random.default_rng(2).normal(0.001, 0.01, 2000)
+    r = pd.Series(e + 0.5 * np.r_[0.0, e[:-1]])  # positively autocorrelated
+    assert sharpe_t(r) < 0.85 * sharpe_t(r, lags=0)

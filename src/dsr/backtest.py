@@ -6,7 +6,7 @@ Callers pass the stocks traded (>= $1B)."""
 import numpy as np
 import pandas as pd
 
-from dsr.evaluation import _group_rank, ic_summary
+from dsr.evaluation import NW_LAGS, _group_rank, ic_summary
 
 DAYS_A_YEAR = 252
 
@@ -144,11 +144,27 @@ def drawdowns(returns: pd.Series) -> pd.Series:
     return pd.Series(np.bincount(spell)[1:], name="days")
 
 
+def sharpe_t(returns: pd.Series, lags: int = NW_LAGS) -> float:
+    """The t-statistic of a daily return series' Sharpe ratio by the delta method (Lo 2002): the Sharpe ratio as a
+    function of the mean and the mean square, whose covariance is estimated by Newey-West with `lags` lags, as every
+    other t-statistic here (`ic_summary`). It allows for skewness, fat tails and autocorrelation; with no lags it is
+    Mertens' standard error."""
+    r = returns.dropna().to_numpy(dtype=float)
+    n, m1, m2 = len(r), r.mean(), (r ** 2).mean()
+    sd = np.sqrt(m2 - m1 ** 2)
+    x = np.column_stack([r - m1, r ** 2 - m2])
+    cov = x.T @ x / n
+    for k in range(1, lags + 1):
+        lagged = x[k:].T @ x[:-k] / n
+        cov += (1 - k / (lags + 1)) * (lagged + lagged.T)
+    grad = np.array([m2, -m1 / 2]) / sd ** 3  # of m1 / sqrt(m2 - m1²)
+    return float(m1 / sd / np.sqrt(grad @ cov @ grad / n))
+
+
 def stress(returns: pd.Series, market: pd.Series, drop: float = 0.01) -> dict:
     """One daily return series, summed like the long-short (a book of $1 a side): its mean (bp, and annualized in %) and
-    Newey-West t-statistic; annualized volatility; the annualized Sharpe ratio and its t-statistic (Mertens' standard
-    error, which allows for skewness and kurtosis but not autocorrelation); the Sortino ratio (its downside deviation
-    is the root mean square of the days below 0, over every day); its distribution (skewness, excess kurtosis, percentiles, worst and best day, in bp); the largest drawdown
+    Newey-West t-statistic; annualized volatility; the annualized Sharpe ratio and its t-statistic (`sharpe_t`); the
+    Sortino ratio (its downside deviation is the root mean square of the days below 0, over every day); its distribution (skewness, excess kurtosis, percentiles, worst and best day, in bp); the largest drawdown
     (%), the number of drawdowns and their mean and longest length in days (`drawdowns`); the share of winning days
     and the average win and loss (bp); the correlation with `market` (the universe's average return, by day); and the
     mean and Sharpe ratio without the best `drop` of the days and without the best `drop` of the winning days (each
@@ -159,11 +175,9 @@ def stress(returns: pd.Series, market: pd.Series, drop: float = 0.01) -> dict:
     lengths = drawdowns(r)
     sharpe = lambda s: float(np.sqrt(DAYS_A_YEAR) * s.mean() / s.std())
     without = lambda best: r.drop(best.nlargest(max(1, round(drop * len(best)))).index)
-    daily_sharpe = float(r.mean() / r.std())
-    sharpe_se = np.sqrt((1 - r.skew() * daily_sharpe + (r.kurt() + 2) / 4 * daily_sharpe ** 2) / len(r))
     out = {"mean_bp": 1e4 * float(r.mean()), "annual_mean_pct": 100 * DAYS_A_YEAR * float(r.mean()),
            "t": ic_summary(r)["ic_t"], "annual_vol_pct": 100 * np.sqrt(DAYS_A_YEAR) * float(r.std()),
-           "sharpe": sharpe(r), "sharpe_t": float(daily_sharpe / sharpe_se),
+           "sharpe": sharpe(r), "sharpe_t": sharpe_t(r),
            "sortino": float(np.sqrt(DAYS_A_YEAR) * r.mean() / np.sqrt((np.minimum(r, 0) ** 2).mean())),
            "skew": float(r.skew()), "excess_kurtosis": float(r.kurt()),
            **{f"p{q}_bp": 1e4 * float(r.quantile(q / 100)) for q in (1, 5, 50, 95, 99)},

@@ -67,6 +67,8 @@ def _(mo):
     HOURS = ROOT / "data" / "processed" / "cnn_hours_train.npz"
     DAY_BARS = ROOT / "data" / "processed" / "cnn_bars_train.npz"  # the one-day charts' drawing data (large caps)
     PANEL = ROOT / "data" / "processed" / "model_panel_train.parquet"
+    DAY_BARS_TEST = ROOT / "data" / "processed" / "cnn_bars_test.npz"  # read only by --test
+    TEST_PANEL = ROOT / "data" / "processed" / "model_panel_test.parquet"  # read only by --test
     OUT = ROOT / "data" / "walkforward" / "two_branch"
     OUT_DAY = ROOT / "data" / "walkforward" / "two_branch_day"  # --chart day
     OUT_DAY_CNN = ROOT / "data" / "walkforward" / "two_branch_day_cnn"  # --chart day_cnn
@@ -75,6 +77,7 @@ def _(mo):
                  "learning_rate": 1e-4, "weight_decay": 0.05, "norm_sample": 20_000}  # --chart day_cnn's step 1a: 06's
     TARGET = "target_demeaned"
     FIRST, EVERY, HOLD_OUT_MONTHS = "2019-01-01", "year", 12
+    TEST_FIRST = "2024-01-01"  # --test: the test years, 2024-2025, run once with the validation run's settings
     CROSSFIT_YEARS = (2014, 2015, 2016, 2017, 2018)  # --crossfit: each year predicted from the other four
     EMBARGO_DAYS = 20  # --crossfit: trading days after the year not trained on (the features look back 20 days)
     DEVICE = "mps"
@@ -93,30 +96,41 @@ def _(mo):
     JOINT_LAMS = (0.25, 0.5, 0.75)
     QUICK = {"price_epochs": 1, "tabular_epochs": 1, "combined_epochs": 2, "finetune_epochs": 1}  # --quick
     CORR_SAMPLE = 20_000  # the fixed hold-out sample for the correlations of the model with each head
-    return (CHART_CNN, COMBINED_FIT, CORR_SAMPLE, CROSSFIT_YEARS, DAY_BARS, DEVICE, EMBARGO_DAYS, EVERY, FINETUNE,
-            FIRST, HOLD_OUT_MONTHS, HOURS,
+    return (CHART_CNN, COMBINED_FIT, CORR_SAMPLE, CROSSFIT_YEARS, DAY_BARS, DAY_BARS_TEST, DEVICE, EMBARGO_DAYS, EVERY,
+            FINETUNE, FIRST, HOLD_OUT_MONTHS, HOURS, TEST_FIRST, TEST_PANEL,
             JOINT, JOINT_LAMS, OUT, OUT_DAY, OUT_DAY_CNN, OUT_JOINT, PANEL, PRICE, QUICK, STEP2, TABULAR, TARGET)
 
 
 @app.cell
-def _(DAY_BARS, DEVICE, HOURS, HourWindows, Images, JointData, PANEL, TARGET, TwoBranchData, feature_columns, np,
-      pd):
-    def load(stocks=None, chart="hours"):
-        """The stock-days and their data on the GPU for the chart: "hours" (load_hours) or "day" (load_day)."""
-        return load_hours(stocks) if chart == "hours" else load_day(stocks)
+def _(DAY_BARS, DAY_BARS_TEST, DEVICE, HOURS, HourWindows, Images, JointData, PANEL, TARGET, TEST_PANEL, TwoBranchData,
+      feature_columns, np, pd):
+    def load(stocks=None, chart="hours", test=False):
+        """The stock-days and their data on the GPU for the chart: "hours" (load_hours) or "day" (load_day); `test`
+        adds the test years (one-day charts only)."""
+        if test and chart == "hours":
+            raise ValueError("the test years have one-day charts only (--chart day or day_cnn)")
+        return load_hours(stocks) if chart == "hours" else load_day(stocks, test)
 
 
-    def load_day(stocks=None):
+    def load_day(stocks=None, test=False):
         """Every large-cap stock-day with one-day drawing data and a model-panel row (all of them, or `stocks` PERMNOs
         spread over them, as a quick check): their keys, target and return, and the data on the GPU (the one-day charts
-        drawn from the drawing data, the 17 features)."""
+        drawn from the drawing data, the 17 features). `test`: the test years' charts and panel rows follow the
+        training ones."""
         with np.load(DAY_BARS) as z:
             keys = pd.DataFrame({"day": pd.to_datetime(z["day"]), "permno": z["permno"]})
             arrays = {k: z[k] for k in ("rows", "volume", "colors")}
+        if test:
+            with np.load(DAY_BARS_TEST) as z:
+                keys = pd.concat([keys, pd.DataFrame({"day": pd.to_datetime(z["day"]), "permno": z["permno"]})],
+                                 ignore_index=True)
+                arrays = {k: np.concatenate([a, z[k]]) for k, a in arrays.items()}
         if stocks:  # spread over the PERMNOs
             permnos = np.unique(keys["permno"])
             keys = keys[keys["permno"].isin(permnos[::max(1, len(permnos) // stocks)][:stocks])]
         panel = pd.read_parquet(PANEL)
+        if test:
+            panel = pd.concat([panel, pd.read_parquet(TEST_PANEL)], ignore_index=True)
         features = feature_columns(panel.columns)
         panel["day"] = pd.to_datetime(panel["day"])
         keys = keys.reset_index(names="pos").merge(panel, on=["day", "permno"], how="inner", validate="one_to_one")
@@ -186,7 +200,7 @@ def _(DAY_BARS, DEVICE, HOURS, HourWindows, Images, JointData, PANEL, TARGET, Tw
 @app.cell
 def _(
     CHART_CNN, COMBINED, COMBINED_FIT, CORR_SAMPLE, CROSSFIT_YEARS, CombinedMLP, DEVICE, EMBARGO_DAYS, EVERY,
-    FINETUNE, FIRST, GreyImages, crossfit_folds,
+    FINETUNE, FIRST, GreyImages, TEST_FIRST, crossfit_folds,
     HOLD_OUT_MONTHS, JOINT, JOINT_COMBINED, JOINT_LAMS, JOINT_TABULAR, OUT_DAY_CNN, PRICE, QUICK, copy_chart_cnn,
     fit_chart_cnn,
     STEP2, TABULAR, TARGET, WIDTH, Balance, TwoBranchNet, collect, daily_rank_ic, finetune, fold_done, fold_indices,
@@ -209,12 +223,13 @@ def _(
         (out / "choices.json").write_text(json.dumps({**read_choices(out), **found}, indent=2))
 
 
-    def fold_list(keys, n_folds, crossfit=False):
-        """The yearly walk-forward folds from FIRST, or with `crossfit` each of CROSSFIT_YEARS predicted from the other
-        four (the out-of-sample predictions of the years before the first fold)."""
+    def fold_list(keys, n_folds, crossfit=False, test=False):
+        """The yearly walk-forward folds from FIRST (from TEST_FIRST with `test`: the test years), or with `crossfit`
+        each of CROSSFIT_YEARS predicted from the other four (the out-of-sample predictions of the years before the
+        first fold)."""
         days = np.unique(keys["day"].to_numpy())
         found = (crossfit_folds(days, CROSSFIT_YEARS, EMBARGO_DAYS) if crossfit
-                 else folds(days, first=FIRST, every=EVERY))
+                 else folds(days, first=TEST_FIRST if test else FIRST, every=EVERY))
         return found[:n_folds]
 
 
@@ -224,23 +239,24 @@ def _(
 
 
     def run_stage12(out, n_folds=None, stocks=None, width=WIDTH, quick=False, max_epochs=None, chart="hours",
-                    crossfit=False, step2=None):
+                    crossfit=False, step2=None, test=False):
         """Fold by fold: step 1b, step 1a, then step 2 with every setting not yet written; prints warning signs 1 and 2
         on the first fold. A fold's trained branches (tab.pt, price.pt) and the frozen branches' outputs (summaries.pt)
         are saved and reused, so rerunning step 2 (e.g. with a higher epoch cap, max_epochs) never retrains them.
         `crossfit`: the cross-fitted folds (fold_list). `step2`: only that step 2 setting, written to choices.json as
-        the one step 3 uses (the cross-fit reuses the validation run's choice instead of choosing again)."""
+        the one step 3 uses (the cross-fit and the test reuse the validation run's choice instead of choosing again).
+        `test`: the test years' folds (fold_list), their charts and panel rows added."""
         settings = {step2: STEP2[step2]} if step2 else STEP2
         if step2:
             write_choices(out, step2=step2)
-        keys, data = load(stocks, chart)
+        keys, data = load(stocks, chart, test)
         day, ret = keys["day"].to_numpy(), keys["ret_next"].to_numpy()
         balance = Balance(out / "balance.parquet")
         price_p = {**PRICE, **({"max_epochs": QUICK["price_epochs"]} if quick else {})}
         tab_p = {**TABULAR, **({"epochs": QUICK["tabular_epochs"]} if quick else {})}
         comb_p = {**COMBINED_FIT, **({"max_epochs": QUICK["combined_epochs"]} if quick else {}),
                   **({"max_epochs": max_epochs} if max_epochs else {})}
-        for i, fold in enumerate(fold_list(keys, n_folds, crossfit)):
+        for i, fold in enumerate(fold_list(keys, n_folds, crossfit, test)):
             if folds_done([out / f"comb_s2_{s}" for s in settings], fold.name):
                 continue
             start = time.perf_counter()
@@ -351,20 +367,20 @@ def _(
 
 
     def run_stage3(out, source=None, n_folds=None, stocks=None, width=WIDTH, lam=0.5, quick=False, chart="hours",
-                   crossfit=False):
+                   crossfit=False, test=False):
         """Fold by fold, step 3 from the checkpoints in `source` (out by default; the λ = 0 control writes elsewhere);
         prints warning sign 3 on the first fold. Also the tabular branch fine-tuned alone on the hold-out year with its
         own loss and step 3's settings (tab_ref_s3): success rule 1's comparison, since step 3 trains the tabular branch
         through the combined loss only."""
         source = source or out
         setting = read_choices(source)["step2"]
-        keys, data = load(stocks, chart)
+        keys, data = load(stocks, chart, test)
         balance = Balance(out / "balance.parquet")
         p = {**FINETUNE, **({"max_epochs": QUICK["finetune_epochs"]} if quick else {}),
              "learning_rate": {"one_d": PRICE["learning_rate"] / 10, "price_head": PRICE["learning_rate"] / 10,
                                "tab_body": TABULAR["learning_rate"] / 10, "tab_head": TABULAR["learning_rate"] / 10,
                                "combined": STEP2[setting]["learning_rate"] / 10}}
-        for i, fold in enumerate(fold_list(keys, n_folds, crossfit)):
+        for i, fold in enumerate(fold_list(keys, n_folds, crossfit, test)):
             if folds_done([out / "comb_s3", out / "price_s3", out / "tab_s3", out / "tab_ref_s3"], fold.name):
                 continue
             start = time.perf_counter()
@@ -532,6 +548,10 @@ def _(mo):
         --out data/walkforward/crossfit/two_branch_day_cnn                                  # 2014-2018, cross-fitted
     uv run python scripts/models/10_two_branch_walkforward.py stage3 --chart day_cnn --crossfit --lam 0.1 \
         --source data/walkforward/crossfit/two_branch_day_cnn --out data/walkforward/crossfit/two_branch_day_cnn_lam0.1
+    uv run python scripts/models/10_two_branch_walkforward.py stage12 --chart day_cnn --test --step2 lr0.0003_h16-8 \
+        --out data/walkforward/test/two_branch_day_cnn                                      # the test years, once
+    uv run python scripts/models/10_two_branch_walkforward.py stage3 --chart day_cnn --test --lam 0.1 \
+        --source data/walkforward/test/two_branch_day_cnn --out data/walkforward/test/two_branch_day_cnn_lam0.1
     ```
 
     A quick check end to end: `--stocks 300 --folds 1 --quick --out /tmp/two_branch_check` on every command (`joint`: `--lams 0.5`, one λ, works too). The backup (`explanations/CNN/fusion.md`, backup): `--width 32 --out data/walkforward/two_branch_w32` on every command. The one-day chart instead of the 21-day one: `--chart day` on every command (output in `data/walkforward/two_branch_day`).
@@ -556,6 +576,8 @@ def _(JOINT_LAMS, OUT, OUT_DAY, OUT_DAY_CNN, OUT_JOINT, Path, STEP2, WIDTH, argp
                 c.add_argument("--folds", type=int, help="only the first N folds")
                 c.add_argument("--crossfit", action="store_true",
                                help="2014-2018, each year predicted from the other four (give --out)")
+                c.add_argument("--test", action="store_true",
+                               help="the test years (2024-2025), once, with the validation run's settings (give --out)")
                 c.add_argument("--quick", action="store_true", help="one or two epochs a step, as a quick check")
             if name in ("speed", "stage12", "stage3"):
                 c.add_argument("--width", type=int, default=WIDTH, help="the 1D block's width (32: the backup)")
@@ -576,17 +598,19 @@ def _(JOINT_LAMS, OUT, OUT_DAY, OUT_DAY_CNN, OUT_JOINT, Path, STEP2, WIDTH, argp
         if args.command == "joint":
             print(run_joint(args.out, tuple(args.lams), args.folds, args.stocks, args.quick), flush=True)
             return
+        if getattr(args, "test", False) and not args.out:
+            parser.error("--test writes only where --out says, never into the validation run's folders")
         args.out = args.out or {"hours": OUT, "day": OUT_DAY, "day_cnn": OUT_DAY_CNN}[args.chart]
         if args.command == "speed":
             result = run_speed(args.stocks, args.width, chart=args.chart)
         elif args.command == "stage12":
             result = run_stage12(args.out, args.folds, args.stocks, args.width, args.quick, args.max_epochs, args.chart,
-                                 args.crossfit, args.step2)
+                                 args.crossfit, args.step2, args.test)
         elif args.command == "choose":
             result = run_choose(args.out)
         else:
             result = run_stage3(args.out, args.source, args.folds, args.stocks, args.width, args.lam, args.quick,
-                                args.chart, args.crossfit)
+                                args.chart, args.crossfit, args.test)
         print(result, flush=True)
 
 

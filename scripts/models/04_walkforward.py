@@ -274,7 +274,7 @@ def _(
                 beta, se = linear_inference(x[fit_rows], y[fit_rows], day[fit_rows], **model.linear)
                 betas.append(pd.DataFrame({"fold": fold.name, "feature": features, "beta_bp": 1e4 * beta,
                                            "se_bp": 1e4 * se, "t": beta / se}))
-            elif not crossfit:
+            elif not (crossfit or test):  # the test needs only the predictions
                 rng = np.random.default_rng(i)
                 pool = np.flatnonzero(rows & large & ~np.isnan(y))  # the month's >= $1B rows with a target
                 background = x[rng.choice(np.flatnonzero(fit_rows & large), BACKGROUND_ROWS, replace=False)]

@@ -17,7 +17,7 @@ def _(mo):
     - **Colors:** each bar's six values, standardized across the large caps' same bar that day. Abnormal retail activity compares a bar's retail trades with the same bar over the previous 20 trading days (at least 15), each day counted for the stocks in the panel that day.
     - **Point in time:** a day's colors use only that day's bars, all before its cutoff, and the 20 days before it.
 
-    **Input:** `data/intermediate/taq/panel_train.parquet` and each training day's `bars.parquet` and `prices.parquet`. **Output:** `data/processed/cnn_bars_train.npz`: `day`, `permno`, and the drawing data `rows` (n × 40 × 4), `volume` (n × 40) and `colors` (n × 40 × 6), all uint8 (`dsr.cnn.drawing`). The test days are not read.
+    **Input:** `data/intermediate/taq/panel_train.parquet` and each training day's `bars.parquet` and `prices.parquet`. **Output:** `data/processed/cnn_bars_train.npz`: `day`, `permno`, and the drawing data `rows` (n × 40 × 4), `volume` (n × 40) and `colors` (n × 40 × 6), all uint8 (`dsr.cnn.drawing`). The test days are not read, except by `build --test`, which draws them (2024-2025) the same way into `data/processed/cnn_bars_test.npz`, its retail history first filled with the last 20 training days.
     """)
     return
 
@@ -34,13 +34,14 @@ def _():
     import pandas as pd
     import pyarrow.parquet as pq
 
-    from dsr.cnn import (FLOW_COLUMNS, FIRST_SESSION_SLOT, PRICES, RetailHistory, day_retail_trades, day_table,
-                         drawing, pixel_values)
+    from dsr.cnn import (FLOW_COLUMNS, FIRST_SESSION_SLOT, HISTORY_DAYS, PRICES, RetailHistory, day_retail_trades,
+                         day_table, drawing, pixel_values)
     from dsr.panel import LARGE_CAP, SESSION_BARS
 
     return (
         FIRST_SESSION_SLOT,
         FLOW_COLUMNS,
+        HISTORY_DAYS,
         LARGE_CAP,
         PRICES,
         Path,
@@ -65,13 +66,15 @@ def _(mo):
     ROOT = mo.notebook_dir().parents[1]
     TAQ_DIR = ROOT / "data" / "intermediate" / "taq"
     OUT = ROOT / "data" / "processed" / "cnn_bars_train.npz"
-    return OUT, TAQ_DIR
+    OUT_TEST = ROOT / "data" / "processed" / "cnn_bars_test.npz"  # build --test
+    return OUT, OUT_TEST, TAQ_DIR
 
 
 @app.cell
 def _(
     FIRST_SESSION_SLOT,
     FLOW_COLUMNS,
+    HISTORY_DAYS,
     LARGE_CAP,
     PRICES,
     RetailHistory,
@@ -86,19 +89,28 @@ def _(
     pq,
     time,
 ):
-    def build(out, days=None):
+    def build(out, days=None, test=False):
         """The drawing data of every large-cap stock-day of the training days, in day order (the first `days` days
-        only, as a quick check), written to `out`."""
-        panel = pq.read_table(TAQ_DIR / "panel_train.parquet",
-                              columns=["day", "permno", "cap_prev", "early_close"]).to_pandas()
+        only, as a quick check), written to `out`. With `test`, the test days instead, the retail history first
+        filled with the last HISTORY_DAYS training days (it holds the days before each one drawn)."""
+        columns = ["day", "permno", "cap_prev", "early_close"]
+        split = "test" if test else "train"
+        panel = pq.read_table(TAQ_DIR / f"panel_{split}.parquet", columns=columns).to_pandas()
+        before = pq.read_table(TAQ_DIR / "panel_train.parquet", columns=columns).to_pandas() if test else panel[:0]
+        warm_days = pd.DatetimeIndex(sorted(before["day"].unique()))[-HISTORY_DAYS:] if test else pd.DatetimeIndex([])
+        both = pd.concat([before[before["day"].isin(warm_days)], panel], ignore_index=True)
         all_days = list(pd.DatetimeIndex(sorted(panel["day"].unique())))[:days]
-        members = panel.groupby("day")["permno"].agg(set)
+        members = both.groupby("day")["permno"].agg(set)
         large = panel[panel["cap_prev"] >= LARGE_CAP].groupby("day")["permno"].agg(sorted)
-        early = panel.groupby("day")["early_close"].first()
-        history = RetailHistory(panel["permno"].unique())
+        early = both.groupby("day")["early_close"].first()
+        history = RetailHistory(both["permno"].unique())
+        for day in warm_days:
+            bars = pq.read_table(TAQ_DIR / "train" / f"{day:%Y%m%d}" / "bars.parquet",
+                                 columns=["permno", "piece", "bar", *FLOW_COLUMNS]).to_pandas()
+            history.add(members[day], FIRST_SESSION_SLOT + SESSION_BARS[bool(early[day])], day_retail_trades(bars))
         parts, start = [], time.perf_counter()
         for i, day in enumerate(all_days):
-            folder = TAQ_DIR / "train" / f"{day:%Y%m%d}"
+            folder = TAQ_DIR / split / f"{day:%Y%m%d}"
             bars = pq.read_table(folder / "bars.parquet",
                                  columns=["permno", "piece", "bar", "close", *FLOW_COLUMNS]).to_pandas()
             prices = pq.read_table(folder / "prices.parquet",
@@ -128,6 +140,7 @@ def _(mo):
     ```
     uv run python scripts/taq/02_cnn_bars.py build                                      # every training day
     uv run python scripts/taq/02_cnn_bars.py build --days 30 --out /tmp/cnn_check.npz   # a quick check
+    uv run python scripts/taq/02_cnn_bars.py build --test                               # the test days, 2024-2025
     ```
 
     Opened in marimo, this cell only shows the commands; the cell below reads what was built.
@@ -136,15 +149,16 @@ def _(mo):
 
 
 @app.cell
-def _(OUT, Path, argparse, build, mo, sys):
+def _(OUT, OUT_TEST, Path, argparse, build, mo, sys):
     def run_from_terminal(argv):
         parser = argparse.ArgumentParser(prog="02_cnn_bars.py")
         sub = parser.add_subparsers(dest="command", required=True)
         b = sub.add_parser("build", help="build the drawing data of every large-cap training stock-day")
         b.add_argument("--days", type=int, help="only the first N days, as a quick check")
-        b.add_argument("--out", type=Path, default=OUT)
+        b.add_argument("--test", action="store_true", help="the test days (2024-2025) instead")
+        b.add_argument("--out", type=Path)
         args = parser.parse_args(argv)
-        print(build(args.out, args.days), flush=True)
+        print(build(args.out or (OUT_TEST if args.test else OUT), args.days, args.test), flush=True)
 
 
     if mo.app_meta().mode == "script" and len(sys.argv) > 1:  # run as a script with a command

@@ -105,7 +105,7 @@ def _(mo):
     mo.md(r"""
     ## 2. Risk and return
 
-    Mean daily return (bp), the same a year (%, 252 days, summed) and its Newey-West t-statistic, and annualized volatility (%); the Sharpe ratio, annualized, and its t-statistic (Mertens' standard error: it allows for the skewness and fat tails but not for autocorrelation, so it is close to the mean's t); the Sortino ratio, annualized (it divides by the root mean square of the losing days, counted over every day); the largest fall of the summed return (% of $1 a side); the number of drawdowns (runs of days below the running peak) and their mean and longest length in trading days; the mean share of the book replaced a day; the daily correlation with the universe.
+    Mean daily return (bp), the same a year (%, 252 days, summed) and its Newey-West t-statistic, and annualized volatility (%); the Sharpe ratio, annualized, and its t-statistic (the delta method with Newey-West errors, as the mean's t: it allows for skewness, fat tails and autocorrelation, and lands close to the mean's t); the Sortino ratio, annualized (it divides by the root mean square of the losing days, counted over every day); the largest fall of the summed return (% of $1 a side); the number of drawdowns (runs of days below the running peak) and their mean and longest length in trading days; the mean share of the book replaced a day; the daily correlation with the universe.
     """)
     return
 

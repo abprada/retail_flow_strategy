@@ -1,18 +1,20 @@
 """Rolling one-year Sharpe ratio and rank IC of a set of models' decile long-short, from the backtest code.
 
-    uv run python scripts/models/05_rolling_sharpe.py [tabular|classes]
+    uv run python scripts/models/05_rolling_sharpe.py [tabular|classes|final]
 
 The long-short of `05_backtest.py` (top decile minus bottom, >= $1B stocks, $1 a side, before costs, 2019-2023); the
 Sharpe at each day is that of the previous 252 trading days (annualized, no risk-free rate), so the first value is one
 year in. The IC at each day is the mean daily rank IC over the same 252 days. `tabular`: linear, LightGBM refit monthly
 and MLP; `classes`: LightGBM refit yearly, the MLP, linear and the two-branch CNN + MLP (step 3 at λ = 0.1), drawn
-one point a week (each week's last trading day, still over the year before it). Writes
-output/rolling_sharpe.{png,csv} and output/rolling_ic.{png,csv}, with the set's name after them for `classes`.
+one point a week (each week's last trading day, still over the year before it); `final`: the CNN + MLP alone over all
+its walk-forward years, validation (2019-2023) then test (2024-2025), every day, with a dashed line where the test starts.
+Writes output/rolling_sharpe.{png,csv} and output/rolling_ic.{png,csv}, with the set's name after them for the others.
 """
 
 import sys
 from pathlib import Path
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -25,18 +27,24 @@ WALKFORWARD = ROOT / "data" / "walkforward"
 OUT = ROOT / "output"
 SETS = {"tabular": {"Linear": "linear", "LightGBM": "lgbm", "MLP": "mlp"},
         "classes": {"LightGBM": "lgbm_yearly", "MLP": "mlp", "Linear": "linear",
-                    "CNN + MLP": "two_branch_day_cnn_lam0.1/comb_s3"}}
+                    "CNN + MLP": "two_branch_day_cnn_lam0.1/comb_s3"},
+        "final": {"CNN + MLP": ("two_branch_day_cnn_lam0.1/comb_s3", "test/two_branch_day_cnn_lam0.1/comb_s3")}}
 COLORS = {"tabular": {"Linear": "#81c5ea", "LightGBM": "#019df1", "MLP": "#002438"},
           "classes": {"Linear": "#81c5ea", "LightGBM": "#019df1", "MLP": "#2c5a74",  # the muted blue darkened: as
-                      "CNN + MLP": "#002438"}}  # #467c9a it was too close to LightGBM's
+                      "CNN + MLP": "#002438"},  # #467c9a it was too close to LightGBM's
+          "final": {"CNN + MLP": "#019df1"}}
 WINDOW, BUCKETS = 252, 10
 STEP = {"classes": "W"}  # the sets drawn one point a period (pandas period, "W" a week): the year to its last day
 LABEL_GAP = 0.06  # share of the y range: names of lines ending together are never closer than this
+SPLITS = {"final": pd.Timestamp("2024-01-01")}  # the dashed line: where the test years start
 
 
-def long_short(folder: str) -> tuple[pd.Series, pd.Series]:
-    """The model's daily decile long-short and its daily rank IC."""
-    p = pd.read_parquet(WALKFORWARD / folder / "predictions.parquet", columns=["day", "permno", "pred", "ret_next", "large_cap"])
+def long_short(folders: str | tuple[str, ...]) -> tuple[pd.Series, pd.Series]:
+    """The model's daily decile long-short and its daily rank IC (a tuple of folders: one model's predictions, joined in
+    time)."""
+    p = pd.concat([pd.read_parquet(WALKFORWARD / f / "predictions.parquet",
+                                   columns=["day", "permno", "pred", "ret_next", "large_cap"])
+                   for f in ([folders] if isinstance(folders, str) else folders)], ignore_index=True)
     p = p[p["large_cap"]]
     held, average = positions(p["day"], p["permno"], p["pred"], p["ret_next"], BUCKETS)
     return daily(held, average)["long_short"].dropna(), daily_rank_ic(p["day"], p["pred"], p["ret_next"])
@@ -47,12 +55,17 @@ def rolling_sharpe(r: pd.Series) -> pd.Series:
     return np.sqrt(252) * roll.mean() / roll.std()
 
 
-def draw(rolling: pd.DataFrame, colors: dict[str, str], title: str):
+def draw(rolling: pd.DataFrame, colors: dict[str, str], title: str, split: pd.Timestamp | None = None):
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 12})
     fig, ax = plt.subplots(figsize=(10, 6.2), facecolor="white")
     for name in rolling:
-        ax.plot(rolling.index, rolling[name], color=colors[name], lw=2.6 if name == "CNN + MLP" else 2)
+        ax.plot(rolling.index, rolling[name], color=colors[name], lw=2.6 if name == "CNN + MLP" and len(rolling.columns) > 1 else 2)
     ax.axhline(0, color="#d1d5db", lw=1)
+    if split is not None:  # validation on its left, test on its right
+        ax.axvline(split, color="#6b7280", lw=1, ls=(0, (4, 3)))
+        for text, side, shift in (("Validation", "right", -15), ("Test", "left", 15)):
+            ax.text(split + pd.Timedelta(days=shift), 0.97, text, ha=side, va="top", transform=ax.get_xaxis_transform(),
+                    color="#6b7280", fontsize=11)
     ax.grid(axis="y", color="#e5e7eb", lw=0.8)
     ax.set_axisbelow(True)
     for side in ("top", "right", "left"):
@@ -66,6 +79,9 @@ def draw(rolling: pd.DataFrame, colors: dict[str, str], title: str):
     for name, y in ys.items():
         ax.text(last + pd.Timedelta(days=15), y, name, color=colors[name], va="center", fontsize=11, fontweight="bold")
     ax.set_xlim(rolling.index[0], last + pd.Timedelta(days=170))
+    first_day, last_day = mdates.date2num(rolling.index[[0, -1]])
+    ax.set_xticks([t for t in ax.get_xticks() if first_day <= t <= last_day])  # only dates with data
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
     ax.set_title(title, loc="left", fontsize=15, fontweight="bold", color="#002438", pad=12)
     fig.tight_layout()
     return fig
@@ -83,5 +99,5 @@ if __name__ == "__main__":
     OUT.mkdir(exist_ok=True)
     for kind, frame in rolling.items():
         frame.to_csv(OUT / f"rolling_{kind}{suffix}.csv")
-        draw(frame, COLORS[which], titles[kind]).savefig(OUT / f"rolling_{kind}{suffix}.png", dpi=200, facecolor="white")
+        draw(frame, COLORS[which], titles[kind], SPLITS.get(which)).savefig(OUT / f"rolling_{kind}{suffix}.png", dpi=200, facecolor="white")
         print(titles[kind] + "\n" + frame.resample("QE").last().round(3).to_string())
