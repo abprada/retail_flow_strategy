@@ -1,4 +1,4 @@
-# daily-stock-returns
+# retail_flow_strategy
 
 Predicting next-day **cross-sectional** US stock returns: how liquid stocks do relative to each other, not where the market goes.
 
@@ -22,12 +22,8 @@ Every input is known before the 15:50 ET cutoff. Research only; nothing trades l
 
 - The long-short holds the top tenth long and the bottom tenth short, equal-weighted, $1 a side, before costs, on stocks of $1B or more.
 - Every t is Newey-West (5 lags); the Sharpe ratio's by the delta method (`dsr.backtest.sharpe_t`).
-- **In the test the two models cannot be told apart:** the Sharpe difference is +0.04 (95% interval −0.65 to +0.71). The ranking held up (IC t about 2.9), but both long-shorts earned about a third of what they did in validation, and neither Sharpe can be told from zero ([explanations/models/test.md](explanations/models/test.md)).
+- **In the test the two models cannot be told apart:** the Sharpe difference is +0.04 (95% interval −0.65 to +0.71). The ranking held up (IC t about 2.9), but both long-shorts earned about a third of what they did in validation, and neither Sharpe can be told from zero.
 - A LightGBM run made on the test years early (2026-10-24), so the test would not hold up the schedule, stays sealed unread.
-
-**Where to read more:**
-- [explanations/summary.md](explanations/summary.md): every model and result.
-- [explanations/README.md](explanations/README.md): one file per topic.
 
 ## Layout
 
@@ -41,13 +37,12 @@ scripts/
 src/dsr/             # reusable code
 tests/               # its tests
 notebooks/CNN/       # inside the CNNs: the images, kernels and saliency
-explanations/        # how everything works and every result, one topic per file
 reports/             # the odd-lot bad prints, and figures
 output/              # figures for presentations
 data/                # local only (gitignored)
 ```
 
-The rules every input follows are in [AGENTS.md](AGENTS.md):
+Every input follows three rules:
 - no lookahead past the 15:50 cutoff;
 - no survivorship bias;
 - settings chosen on the training years only.
@@ -58,6 +53,11 @@ The rules every input follows are in [AGENTS.md](AGENTS.md):
 uv sync
 uv run pytest
 ```
+
+**Data access:** none of the data is in the repo; `data/` stays local.
+- TAQ and CRSP come from WRDS and need a subscription. The full TAQ pull runs on WRDS Cloud (`scripts/data_acquisition/wrds_cloud/`).
+- Robintrack's holder counts are public.
+- The tests need no data.
 
 The scripts are marimo notebooks.
 - **To open one:** `uv run marimo edit scripts/models/05_backtest.py`.

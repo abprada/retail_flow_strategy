@@ -1,7 +1,7 @@
 [project]
 name = "dsr"
 version = "0.1.0"
-description = "Cross-sectional next-day stock return prediction from a single public data source"
+description = "Next-day cross-sectional US stock return prediction from TAQ trades and quotes, with CRSP and Robintrack"
 authors = [
     { name = "Andres Blanco Prada", email = "ablancoprada@gmail.com" }
 ]

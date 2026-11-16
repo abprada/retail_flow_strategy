@@ -4,7 +4,7 @@
                                                                  [--prices]
 
 With --prices, the price-only pull (taq_cloud_day.py --prices) instead: one table, prices.parquet, from
-/scratch/mit/abprada/taq_prices into data/raw/taq/prices/<YYYYMMDD>/; each day is also compared with the full pull's
+/scratch/mit/<WRDS user>/taq_prices into data/raw/taq/prices/<YYYYMMDD>/; each day is also compared with the full pull's
 bars of that day in data/raw/taq/pull/ (every price row has its bar, its high and low lie within the bar's, its round
 lots are at most the bar's trades); a difference is printed and recorded in downloaded.csv, not retried.
 
@@ -13,7 +13,7 @@ Needs one SSH connection that later commands share, so that WRDS asks for the pa
 
     Host wrds
         HostName wrds-cloud.wharton.upenn.edu
-        User abprada
+        User <your WRDS username>
         ControlMaster auto
         ControlPath ~/.ssh/cm-%r@%h-%p
         ControlPersist 24h
@@ -126,7 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--host", default="wrds", help="the SSH host alias (see above)")
     parser.add_argument("--days-file", type=Path, help="one YYYY-MM-DD per line (default: every trading day)")
-    parser.add_argument("--remote", help="default /scratch/mit/abprada/taq_out, or taq_prices with --prices")
+    parser.add_argument("--remote", help="default /scratch/mit/<WRDS user>/taq_out, or taq_prices with --prices")
     parser.add_argument("--streams", type=int, default=4)
     parser.add_argument("--every", type=float, default=10, help="minutes between rounds")
     parser.add_argument("--delete-remote", action="store_true", help="delete checked days from WRDS scratch")
@@ -135,10 +135,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.prices:
         VERSION, LOCAL, TABLES = _job.code_version(prices=True), ROOT / "data" / "raw" / "taq" / "prices", ["prices"]
-    args.remote = args.remote or f"/scratch/mit/abprada/{'taq_prices' if args.prices else 'taq_out'}"
 
     if subprocess.run(["ssh", "-O", "check", args.host], capture_output=True, check=False).returncode != 0:
         raise SystemExit(f"no shared SSH connection to {args.host}: run `ssh -fN {args.host}` first (password + Duo)")
+    # $USER is expanded on WRDS, so this is the WRDS username from the SSH config
+    args.remote = args.remote or f"/scratch/mit/{ssh(args.host, 'echo $USER').strip()}/{'taq_prices' if args.prices else 'taq_out'}"
     with open(DAYS) as f:
         closes = {r["date"].replace("-", ""): r["close"] for r in csv.DictReader(f)}
     wanted = set(closes)
